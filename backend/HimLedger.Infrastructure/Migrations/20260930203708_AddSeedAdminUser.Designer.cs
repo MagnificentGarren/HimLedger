@@ -4,6 +4,7 @@ using HimLedger.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HimLedger.Infrastructure.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260930203708_AddSeedAdminUser")]
+    partial class AddSeedAdminUser
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -190,43 +193,6 @@ namespace HimLedger.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Departments");
-
-                    b.HasData(
-                        new
-                        {
-                            DepartmentId = 1,
-                            Code = "LOG",
-                            CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Name = "Logistics & Operations"
-                        },
-                        new
-                        {
-                            DepartmentId = 2,
-                            Code = "FIN",
-                            CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Name = "Finance & Accounting"
-                        },
-                        new
-                        {
-                            DepartmentId = 3,
-                            Code = "IT",
-                            CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Name = "Software & IT"
-                        },
-                        new
-                        {
-                            DepartmentId = 4,
-                            Code = "HR",
-                            CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Name = "Human Resources (HR)"
-                        },
-                        new
-                        {
-                            DepartmentId = 5,
-                            Code = "MKT",
-                            CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, 0, DateTimeKind.Utc),
-                            Name = "Sales & Marketing"
-                        });
                 });
 
             modelBuilder.Entity("HimLedger.Domain.Entities.Expense", b =>

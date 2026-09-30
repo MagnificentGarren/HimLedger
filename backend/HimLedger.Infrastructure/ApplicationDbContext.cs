@@ -1,10 +1,24 @@
 using HimLedger.Domain.Entities;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
 namespace HimLedger.Infrastructure;
 
 public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : DbContext(options)
 {
+    private static readonly PasswordHasher<User> PasswordHasher = new();
+    private static readonly User SeedAdminUser = new()
+    {
+        UserId = 1,
+        FirstName = "System",
+        LastName = "Admin",
+        Email = "admin@himledger.com",
+        PasswordHash = PasswordHasher.HashPassword(new User(), "Password123"),
+        RoleId = 1,
+        DepartmentId = null,
+        CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc)
+    };
+
     public DbSet<Department> Departments => Set<Department>();
     public DbSet<Role> Roles => Set<Role>();
     public DbSet<User> Users => Set<User>();
@@ -24,6 +38,12 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(department => department.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.HasIndex(department => department.Name).IsUnique();
             entity.HasIndex(department => department.Code).IsUnique();
+            entity.HasData(
+                new Department { DepartmentId = 1, Name = "Logistics & Operations", Code = "LOG", CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc) },
+                new Department { DepartmentId = 2, Name = "Finance & Accounting", Code = "FIN", CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc) },
+                new Department { DepartmentId = 3, Name = "Software & IT", Code = "IT", CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc) },
+                new Department { DepartmentId = 4, Name = "Human Resources (HR)", Code = "HR", CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc) },
+                new Department { DepartmentId = 5, Name = "Sales & Marketing", Code = "MKT", CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc) });
         });
 
         modelBuilder.Entity<Role>(entity =>
@@ -44,6 +64,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(user => user.PasswordHash).HasMaxLength(255);
             entity.Property(user => user.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.HasIndex(user => user.Email).IsUnique();
+            entity.HasData(SeedAdminUser);
             entity.HasOne(user => user.Role)
                 .WithMany(role => role.Users)
                 .HasForeignKey(user => user.RoleId)

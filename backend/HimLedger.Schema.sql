@@ -16,6 +16,14 @@ CREATE TABLE Departments (
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE()
 );
 
+INSERT INTO Departments (Name, Code)
+VALUES
+    ('Logistics & Operations', 'LOG'),
+    ('Finance & Accounting', 'FIN'),
+    ('Software & IT', 'IT'),
+    ('Human Resources (HR)', 'HR'),
+    ('Sales & Marketing', 'MKT');
+
 -- 3. Roles Table
 CREATE TABLE Roles (
     RoleId INT IDENTITY(1,1) PRIMARY KEY,
