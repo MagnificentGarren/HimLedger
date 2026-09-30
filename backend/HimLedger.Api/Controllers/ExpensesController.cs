@@ -17,7 +17,27 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<ExpenseResponseDto>>> GetExpenses()
     {
-        var expenses = await context.Expenses
+        var expensesQuery = context.Expenses.AsQueryable();
+        if (User.IsInRole("Employee"))
+        {
+            if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
+            {
+                return Unauthorized();
+            }
+
+            expensesQuery = expensesQuery.Where(expense => expense.UserId == userId);
+        }
+        else if (User.IsInRole("Manager"))
+        {
+            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
+            {
+                return Unauthorized();
+            }
+
+            expensesQuery = expensesQuery.Where(expense => expense.DepartmentId == departmentId);
+        }
+
+        var expenses = await expensesQuery
             .Select(ResponseProjection)
             .ToListAsync();
 
@@ -27,8 +47,27 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<ActionResult<ExpenseResponseDto>> GetExpense(int id)
     {
-        var expense = await context.Expenses
-            .Where(expense => expense.ExpenseId == id)
+        var expenseQuery = context.Expenses.Where(expense => expense.ExpenseId == id);
+        if (User.IsInRole("Employee"))
+        {
+            if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
+            {
+                return Unauthorized();
+            }
+
+            expenseQuery = expenseQuery.Where(expense => expense.UserId == userId);
+        }
+        else if (User.IsInRole("Manager"))
+        {
+            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
+            {
+                return Unauthorized();
+            }
+
+            expenseQuery = expenseQuery.Where(expense => expense.DepartmentId == departmentId);
+        }
+
+        var expense = await expenseQuery
             .Select(ResponseProjection)
             .SingleOrDefaultAsync();
 
@@ -86,6 +125,19 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         if (expense is null)
         {
             return NotFound();
+        }
+
+        if (User.IsInRole("Manager"))
+        {
+            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
+            {
+                return Unauthorized();
+            }
+
+            if (expense.DepartmentId != departmentId)
+            {
+                return Forbid();
+            }
         }
 
         var reviewerIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;

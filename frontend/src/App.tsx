@@ -1,8 +1,9 @@
 import React from 'react';
 import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { Dashboard } from './pages/Dashboard';
+import { AppWorkspace } from './pages/AppWorkspace';
 import { Login } from './pages/Login';
+import { ArchitecturePage, FeaturesPage, HomePage, PricingPage } from './pages/PublicSite';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { token } = useAuth();
@@ -15,16 +16,21 @@ export const App: React.FC = () => {
     <AuthProvider>
       <Router>
         <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/features" element={<FeaturesPage />} />
+          <Route path="/about" element={<ArchitecturePage />} />
+          <Route path="/pricing" element={<PricingPage />} />
           <Route path="/login" element={<Login />} />
           <Route
-            path="/dashboard"
+            path="/app/*"
             element={
               <ProtectedRoute>
-                <Dashboard />
+                <AppWorkspace />
               </ProtectedRoute>
             }
           />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<Navigate to="/app/dashboard" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Router>
     </AuthProvider>
