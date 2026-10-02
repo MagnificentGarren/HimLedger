@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, LockKeyhole, Mail } from 'lucide-react';
 import { isAxiosError } from 'axios';
 import { Link } from 'react-router-dom';
 import api from '../api/axios';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/auth';
 import { BrandMark } from './PublicSite';
 
 export const Login: React.FC = () => {
@@ -27,7 +27,9 @@ export const Login: React.FC = () => {
       login(token, { userId, firstName, lastName, email, role });
       navigate('/dashboard');
     } catch (err: unknown) {
-      const message = isAxiosError<{ message?: string }>(err) ? err.response?.data?.message : null;
+      const message = isAxiosError<{ detail?: string; message?: string }>(err)
+        ? err.response?.data?.detail ?? err.response?.data?.message
+        : null;
       const isUnavailable = isAxiosError(err) && !err.response;
       setError(message || (isUnavailable
         ? 'Unable to reach HimLedger. Check that the API is running and try again.'

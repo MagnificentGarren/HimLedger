@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+using HimLedger.Api.Models;
 using HimLedger.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,10 +13,14 @@ namespace HimLedger.Api.Controllers;
 public class AuditLogsController(ApplicationDbContext context) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetAuditLogs()
+    public async Task<IActionResult> GetAuditLogs(
+        CancellationToken cancellationToken,
+        [FromQuery, Range(1, 21_474_836)] int page = 1,
+        [FromQuery, Range(1, 100)] int pageSize = 25)
     {
         var records = await context.ApprovalLogs
             .OrderByDescending(log => log.ActionedAt)
+            .ThenByDescending(log => log.ApprovalLogId)
             .Select(log => new
             {
                 log.ApprovalLogId,
@@ -25,17 +31,28 @@ public class AuditLogsController(ApplicationDbContext context) : ControllerBase
                 ReviewedBy = log.ReviewedByUser.FirstName + " " + log.ReviewedByUser.LastName,
                 log.Comments
             })
-            .ToListAsync();
+            .ToPagedResponseAsync(page, pageSize, cancellationToken);
 
-        return Ok(records.Select(record => new
-        {
-            record.ApprovalLogId,
-            TimestampUtc = DateTime.SpecifyKind(record.ActionedAt, DateTimeKind.Utc),
-            record.ExpenseId,
-            record.ExpenseTitle,
-            record.Action,
-            record.ReviewedBy,
-            record.Comments
-        }));
+        return Ok(new PagedResponse<AuditLogItem>(
+            records.Items.Select(record => new AuditLogItem(
+                record.ApprovalLogId,
+                DateTime.SpecifyKind(record.ActionedAt, DateTimeKind.Utc),
+                record.ExpenseId,
+                record.ExpenseTitle,
+                record.Action,
+                record.ReviewedBy,
+                record.Comments)).ToArray(),
+            records.Page,
+            records.PageSize,
+            records.TotalCount));
     }
+
+    public sealed record AuditLogItem(
+        int ApprovalLogId,
+        DateTime TimestampUtc,
+        int ExpenseId,
+        string ExpenseTitle,
+        string Action,
+        string ReviewedBy,
+        string? Comments);
 }

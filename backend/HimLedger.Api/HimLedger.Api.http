@@ -1,6 +1,7 @@
 @HimLedger.Api_HostAddress = http://localhost:5228
 
-GET {{HimLedger.Api_HostAddress}}/weatherforecast/
-Accept: application/json
+### API health
+GET {{HimLedger.Api_HostAddress}}/health
+Accept: text/plain
 
 ###

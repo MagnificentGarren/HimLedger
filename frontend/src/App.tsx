@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { AuthProvider } from './context/AuthContext';
+import { useAuth } from './context/auth';
 import { AppWorkspace } from './pages/AppWorkspace';
 import { AuditLogsPage } from './pages/AuditLogs';
 import { BudgetsPage } from './pages/Budgets';

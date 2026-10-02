@@ -5,8 +5,8 @@ import {
   Check, ChevronDown, CircleDollarSign, Clock3, FileText, LayoutDashboard,
   LogOut, Menu, Plus, Receipt, Search, ShieldCheck, WalletCards, X,
 } from 'lucide-react';
-import api from '../api/axios';
-import { useAuth } from '../context/AuthContext';
+import api, { getAllPages } from '../api/axios';
+import { useAuth } from '../context/auth';
 
 interface Expense {
   expenseId: number;
@@ -112,14 +112,14 @@ export const AppWorkspace = () => {
   useEffect(() => {
     const loadCoreData = async () => {
       try {
-        const [expenseResponse, categoryResponse, departmentResponse] = await Promise.all([
-          api.get<Expense[]>('/Expenses'),
-          api.get<Category[]>('/Categories'),
-          api.get<Department[]>('/Departments'),
+        const [loadedExpenses, loadedCategories, loadedDepartments] = await Promise.all([
+          getAllPages<Expense>('/Expenses'),
+          getAllPages<Category>('/Categories'),
+          getAllPages<Department>('/Departments'),
         ]);
-        setExpenses(expenseResponse.data);
-        setCategories(categoryResponse.data);
-        setDepartments(departmentResponse.data);
+        setExpenses(loadedExpenses);
+        setCategories(loadedCategories);
+        setDepartments(loadedDepartments);
       } catch (error) {
         console.error('Failed to load workspace data', error);
         setPageError('Workspace data could not be loaded. Refresh and try again.');
@@ -132,8 +132,8 @@ export const AppWorkspace = () => {
 
   useEffect(() => {
     if (!isBudgets && activePage !== 'dashboard') return;
-    api.get<Budget[]>('/Budgets', { params: { fiscalYear: year, fiscalQuarter: quarter } })
-      .then(({ data }) => setBudgets(data))
+    getAllPages<Budget>('/Budgets', { fiscalYear: year, fiscalQuarter: quarter })
+      .then(setBudgets)
       .catch((error: unknown) => {
         console.error('Failed to load budgets', error);
         setPageError('Budget data could not be loaded for this period.');
@@ -142,8 +142,8 @@ export const AppWorkspace = () => {
 
   useEffect(() => {
     if (!isAudit) return;
-    api.get<AuditRecord[]>('/AuditLogs')
-      .then(({ data }) => setAuditRecords(data))
+    getAllPages<AuditRecord>('/AuditLogs')
+      .then(setAuditRecords)
       .catch((error: unknown) => {
         console.error('Failed to load audit records', error);
         setPageError('Audit records could not be loaded.');
@@ -152,8 +152,11 @@ export const AppWorkspace = () => {
 
   useEffect(() => {
     if (!isUsers) return;
-    api.get<{ users: ManagedUser[]; roles: UserRole[] }>('/Users')
-      .then(({ data }) => { setManagedUsers(data.users); setRoles(data.roles); })
+    Promise.all([
+      getAllPages<ManagedUser>('/Users'),
+      api.get<UserRole[]>('/Users/roles'),
+    ])
+      .then(([users, { data: userRoles }]) => { setManagedUsers(users); setRoles(userRoles); })
       .catch((error: unknown) => {
         console.error('Failed to load user roles', error);
         setPageError('User role data could not be loaded.');
@@ -231,7 +234,7 @@ export const AppWorkspace = () => {
     setFormError('');
     try {
       await api.put('/Budgets', { departmentId: Number(allocation.departmentId), fiscalYear: year, fiscalQuarter: quarter, allocatedAmount: Number(allocation.amount) });
-      const { data } = await api.get<Budget[]>('/Budgets', { params: { fiscalYear: year, fiscalQuarter: quarter } });
+      const data = await getAllPages<Budget>('/Budgets', { fiscalYear: year, fiscalQuarter: quarter });
       setBudgets(data);
       setShowBudgetForm(false);
       setAllocation({ departmentId: '', amount: '' });

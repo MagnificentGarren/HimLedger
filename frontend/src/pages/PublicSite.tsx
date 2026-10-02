@@ -88,7 +88,7 @@ const PageIntro: React.FC<{ tag: string; title: React.ReactNode; text: string }>
 );
 
 const steps = [
-  { number: '01', icon: ReceiptText, title: 'Employee logs a claim', text: 'Add the expense, choose a category, and attach a receipt.' },
+  { number: '01', icon: ReceiptText, title: 'Employee logs a claim', text: 'Add the expense, choose a category, and provide the relevant details.' },
   { number: '02', icon: ChartNoAxesCombined, title: 'Budget check runs', text: 'Available departmental funds are checked before review.' },
   { number: '03', icon: BadgeCheck, title: 'Manager approves', text: 'The decision, timestamp, and reviewer note join the audit trail.' },
 ];
@@ -139,12 +139,12 @@ export const HomePage: React.FC = () => (
         <div className="pillar-grid">
           <article className="pillar-item"><span className="pillar-number">01</span><span className="pillar-icon"><CircleDollarSign size={19} /></span><h3>Real-time budget meters</h3><p>Track departmental quarterly caps as claims move. Know what is committed, available, and approaching its limit.</p><Link to="/features">Explore budget controls <ArrowRight size={14} /></Link></article>
           <article className="pillar-item"><span className="pillar-number">02</span><span className="pillar-icon"><Network size={19} /></span><h3>Multi-tier approvals</h3><p>Route claims to the right department manager for a focused review, with decision context in one place.</p><Link to="/features#roles">Explore workflows <ArrowRight size={14} /></Link></article>
-          <article className="pillar-item"><span className="pillar-number">03</span><span className="pillar-icon"><FileCheck2 size={19} /></span><h3>Audit-ready telemetry</h3><p>Keep reviewer timestamps and comments alongside each decision, with receipts attached to the claim.</p><Link to="/about#stack">Explore architecture <ArrowRight size={14} /></Link></article>
+          <article className="pillar-item"><span className="pillar-number">03</span><span className="pillar-icon"><FileCheck2 size={19} /></span><h3>Audit-ready telemetry</h3><p>Keep reviewer timestamps and comments alongside each decision.</p><Link to="/about#stack">Explore architecture <ArrowRight size={14} /></Link></article>
         </div>
       </section>
 
       <section className="workflow-band" id="workflow">
-        <div className="workflow-heading"><span className="public-kicker"><span />A CLEAR PATH TO CLOSE</span><h2>From receipt to record.</h2><p>One consistent flow gives every claim context and every decision a home.</p></div>
+        <div className="workflow-heading"><span className="public-kicker"><span />A CLEAR PATH TO CLOSE</span><h2>From claim to decision.</h2><p>One consistent flow gives every claim context and every decision a home.</p></div>
         <div className="workflow-steps">{steps.map(({ number, icon: Icon, title, text }) => <article className="workflow-step" key={number}><div className="workflow-step-top"><span>{number}</span><Icon size={19} /></div><h3>{title}</h3><p>{text}</p></article>)}</div>
       </section>
       <section className="public-cta-strip"><div><span className="public-kicker"><span />READY WHEN YOU ARE</span><h2>Bring every expense into view.</h2></div><Link className="public-button-primary" to="/login">Enter your workspace <ArrowRight size={16} /></Link></section>
@@ -155,7 +155,7 @@ export const HomePage: React.FC = () => (
 type RoleKey = 'employee' | 'manager' | 'finance';
 
 const roleContent: Record<RoleKey, { label: string; title: string; description: string; icon: typeof UsersRound; points: string[] }> = {
-  employee: { label: 'Employee', title: 'Submit once. Follow every step.', description: 'A focused claim flow gives employees the essentials without losing the detail finance needs.', icon: BriefcaseBusiness, points: ['Enter amount, date, and expense category', 'Attach a receipt to the submission', 'Track status through review and approval'] },
+  employee: { label: 'Employee', title: 'Submit once. Follow every step.', description: 'A focused claim flow gives employees the essentials without losing the detail finance needs.', icon: BriefcaseBusiness, points: ['Enter amount, date, and expense category', 'Add notes about the business purpose', 'Track status through review and approval'] },
   manager: { label: 'Manager', title: 'Review with the full picture.', description: 'Keep the pending queue focused and make decisions with budget and claim context close at hand.', icon: UsersRound, points: ['See pending claims for your department', 'Approve or reject with a recorded comment', 'Review decision history and timestamps'] },
   finance: { label: 'Finance admin', title: 'Set guardrails across the business.', description: 'Manage department budgets and access while keeping company-wide spend in view.', icon: WalletCards, points: ['Allocate and monitor department budgets', 'Review company-wide spend and claims', 'Manage user roles and access controls'] },
 };

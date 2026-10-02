@@ -14,8 +14,8 @@ import {
   X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import api from '../api/axios';
-import { useAuth } from '../context/AuthContext';
+import api, { getAllPages } from '../api/axios';
+import { useAuth } from '../context/auth';
 
 interface Expense {
   expenseId: number;
@@ -73,10 +73,10 @@ export const Dashboard: React.FC = () => {
     const fetchDashboardData = async () => {
       try {
         await Promise.all([
-          api.get<Expense[]>('/Expenses').then(({ data }) => setExpenses(data)),
-          api.get<Category[]>('/Categories').then(({ data }) => setCategories(data)),
-          api.get<Department[]>('/Departments').then(({ data }) => setDepartments(data)),
-          api.get<Budget[]>('/Budgets').then(({ data }) => setBudgets(data)),
+          getAllPages<Expense>('/Expenses').then(setExpenses),
+          getAllPages<Category>('/Categories').then(setCategories),
+          getAllPages<Department>('/Departments').then(setDepartments),
+          getAllPages<Budget>('/Budgets').then(setBudgets),
         ]);
       } catch (error) {
         console.error('Failed to load dashboard data', error);

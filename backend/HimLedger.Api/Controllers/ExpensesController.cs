@@ -1,5 +1,7 @@
+using System.ComponentModel.DataAnnotations;
 using System.Linq.Expressions;
 using System.Security.Claims;
+using HimLedger.Api.Models;
 using HimLedger.Application.DTOs;
 using HimLedger.Domain.Entities;
 using HimLedger.Infrastructure;
@@ -15,14 +17,20 @@ namespace HimLedger.Api.Controllers;
 public class ExpensesController(ApplicationDbContext context) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<ExpenseResponseDto>>> GetExpenses()
+    public async Task<ActionResult<PagedResponse<ExpenseResponseDto>>> GetExpenses(
+        CancellationToken cancellationToken,
+        [FromQuery, Range(1, 21_474_836)] int page = 1,
+        [FromQuery, Range(1, 100)] int pageSize = 25)
     {
         var expensesQuery = context.Expenses.AsQueryable();
         if (User.IsInRole("Employee"))
         {
             if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
             {
-                return Unauthorized();
+                return Problem(
+                    statusCode: StatusCodes.Status401Unauthorized,
+                    title: "Unauthorized",
+                    detail: "The authenticated user identifier is invalid.");
             }
 
             expensesQuery = expensesQuery.Where(expense => expense.UserId == userId);
@@ -31,28 +39,35 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         {
             if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
             {
-                return Unauthorized();
+                return Problem(
+                    statusCode: StatusCodes.Status401Unauthorized,
+                    title: "Unauthorized",
+                    detail: "The authenticated department identifier is invalid.");
             }
 
             expensesQuery = expensesQuery.Where(expense => expense.DepartmentId == departmentId);
         }
 
         var expenses = await expensesQuery
+            .OrderBy(expense => expense.ExpenseId)
             .Select(ResponseProjection)
-            .ToListAsync();
+            .ToPagedResponseAsync(page, pageSize, cancellationToken);
 
         return Ok(expenses);
     }
 
     [HttpGet("{id:int}")]
-    public async Task<ActionResult<ExpenseResponseDto>> GetExpense(int id)
+    public async Task<ActionResult<ExpenseResponseDto>> GetExpense(int id, CancellationToken cancellationToken)
     {
         var expenseQuery = context.Expenses.Where(expense => expense.ExpenseId == id);
         if (User.IsInRole("Employee"))
         {
             if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
             {
-                return Unauthorized();
+                return Problem(
+                    statusCode: StatusCodes.Status401Unauthorized,
+                    title: "Unauthorized",
+                    detail: "The authenticated user identifier is invalid.");
             }
 
             expenseQuery = expenseQuery.Where(expense => expense.UserId == userId);
@@ -61,7 +76,10 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         {
             if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
             {
-                return Unauthorized();
+                return Problem(
+                    statusCode: StatusCodes.Status401Unauthorized,
+                    title: "Unauthorized",
+                    detail: "The authenticated department identifier is invalid.");
             }
 
             expenseQuery = expenseQuery.Where(expense => expense.DepartmentId == departmentId);
@@ -69,23 +87,31 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
 
         var expense = await expenseQuery
             .Select(ResponseProjection)
-            .SingleOrDefaultAsync();
+            .SingleOrDefaultAsync(cancellationToken);
 
         return expense is null ? NotFound() : Ok(expense);
     }
 
     [HttpPost]
-    public async Task<ActionResult<ExpenseResponseDto>> CreateExpense([FromBody] CreateExpenseDto request)
+    public async Task<ActionResult<ExpenseResponseDto>> CreateExpense(
+        [FromBody] CreateExpenseDto request,
+        CancellationToken cancellationToken)
     {
         var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         if (!int.TryParse(userIdClaim, out var userId))
         {
-            return Unauthorized();
+            return Problem(
+                statusCode: StatusCodes.Status401Unauthorized,
+                title: "Unauthorized",
+                detail: "The authenticated user identifier is invalid.");
         }
 
         if (request.Amount <= 0)
         {
-            return BadRequest(new { message = "Amount must be greater than zero" });
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Bad Request",
+                detail: "Amount must be greater than zero.");
         }
 
         var expense = new Expense
@@ -102,26 +128,32 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         };
 
         context.Expenses.Add(expense);
-        await context.SaveChangesAsync();
+        await context.SaveChangesAsync(cancellationToken);
 
         var response = await context.Expenses
             .Where(savedExpense => savedExpense.ExpenseId == expense.ExpenseId)
             .Select(ResponseProjection)
-            .SingleAsync();
+            .SingleAsync(cancellationToken);
 
         return CreatedAtAction(nameof(GetExpense), new { id = expense.ExpenseId }, response);
     }
 
     [HttpPut("{id:int}/status")]
     [Authorize(Roles = "Manager,Admin")]
-    public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateExpenseStatusDto request)
+    public async Task<IActionResult> UpdateStatus(
+        int id,
+        [FromBody] UpdateExpenseStatusDto request,
+        CancellationToken cancellationToken)
     {
         if (request.Status is not ("Approved" or "Rejected"))
         {
-            return BadRequest(new { message = "Status must be Approved or Rejected" });
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Bad Request",
+                detail: "Status must be Approved or Rejected.");
         }
 
-        var expense = await context.Expenses.FindAsync(id);
+        var expense = await context.Expenses.FindAsync([id], cancellationToken);
         if (expense is null)
         {
             return NotFound();
@@ -131,7 +163,10 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         {
             if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
             {
-                return Unauthorized();
+                return Problem(
+                    statusCode: StatusCodes.Status401Unauthorized,
+                    title: "Unauthorized",
+                    detail: "The authenticated department identifier is invalid.");
             }
 
             if (expense.DepartmentId != departmentId)
@@ -143,7 +178,10 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         var reviewerIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         if (!int.TryParse(reviewerIdClaim, out var reviewerId))
         {
-            return Unauthorized();
+            return Problem(
+                statusCode: StatusCodes.Status401Unauthorized,
+                title: "Unauthorized",
+                detail: "The authenticated user identifier is invalid.");
         }
 
         expense.Status = request.Status;
@@ -155,7 +193,7 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
             Comments = request.Comments
         });
 
-        await context.SaveChangesAsync();
+        await context.SaveChangesAsync(cancellationToken);
         return NoContent();
     }
 
