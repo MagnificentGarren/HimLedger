@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using HimLedger.Domain.Entities;
@@ -16,7 +17,7 @@ namespace HimLedger.Api.IntegrationTests;
 
 public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
 {
-    private const string JwtSecret = "integration-test-secret-at-least-32-bytes";
+    private readonly string _jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
     private readonly WebApplicationFactory<Program> _testFactory;
     private readonly HttpClient _client;
 
@@ -25,7 +26,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var databaseName = Guid.NewGuid().ToString();
         _testFactory = factory.WithWebHostBuilder(builder =>
         {
-            builder.UseSetting("JwtSettings:Secret", JwtSecret);
+            builder.UseSetting("JwtSettings:Secret", _jwtSecret);
             builder.UseSetting("JwtSettings:Issuer", "HimLedger.Tests");
             builder.UseSetting("JwtSettings:Audience", "HimLedger.Tests");
             builder.UseSetting("ConnectionStrings:DefaultConnection", "Server=(localdb)\\mssqllocaldb;Database=HimLedgerTests;Trusted_Connection=True;");
@@ -42,7 +43,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         });
         _client = _testFactory.CreateClient();
         _client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateToken());
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", CreateToken(_jwtSecret));
 
         using var scope = _testFactory.Services.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -109,10 +110,10 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal("Beta", body.RootElement.GetProperty("items")[0].GetProperty("name").GetString());
     }
 
-    private static string CreateToken()
+    private static string CreateToken(string jwtSecret)
     {
         var credentials = new SigningCredentials(
-            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(JwtSecret)),
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
             SecurityAlgorithms.HmacSha256);
         var token = new JwtSecurityToken(
             issuer: "HimLedger.Tests",
