@@ -26,30 +26,45 @@ interface WorkspaceMockData {
 }
 
 const mockWorkspaceApi = async (page: Page, data: WorkspaceMockData = {}) => {
+  let createdExpense: ExpenseFixture | null = null;
+
   await page.route('http://localhost:5228/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
     if (method === 'POST' && path === '/api/Expenses') {
+      createdExpense = {
+        expenseId: 501,
+        userId: 4,
+        userFullName: 'Test User',
+        categoryId: 1,
+        categoryName: 'Travel',
+        departmentId: 1,
+        departmentName: 'North',
+        title: 'Client travel',
+        description: 'Customer meeting',
+        amount: 42,
+        expenseDate: '2026-01-15T00:00:00',
+        receiptUrl: null,
+        status: 'Draft',
+        createdAt: '2026-01-15T10:00:00Z',
+        rowVersion: 'AQIDBAUGBwg=',
+      };
       await route.fulfill({
         status: 201,
-        json: {
-          expenseId: 501,
-          userId: 4,
-          userFullName: 'Test User',
-          categoryId: 1,
-          categoryName: 'Travel',
-          departmentId: 1,
-          departmentName: 'North',
-          title: 'Client travel',
-          description: 'Customer meeting',
-          amount: 42,
-          expenseDate: '2026-01-15T00:00:00',
-          receiptUrl: null,
-          status: 'Pending',
-          createdAt: '2026-01-15T10:00:00Z',
-          rowVersion: 'AQIDBAUGBwg=',
-        } satisfies ExpenseFixture,
+        json: createdExpense,
       });
+      return;
+    }
+    if (method === 'POST' && /^\/api\/Expenses\/\d+\/submit$/.test(path)) {
+      if (createdExpense) createdExpense = { ...createdExpense, status: 'Pending Approval' };
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (method === 'GET' && /^\/api\/Expenses\/\d+$/.test(path)) {
+      const expenseId = Number(path.split('/').pop());
+      const expense = data.expenses?.find((item) => item.expenseId === expenseId)
+        ?? (createdExpense?.expenseId === expenseId ? createdExpense : null);
+      await route.fulfill(expense ? { json: expense } : { status: 404 });
       return;
     }
     if (method === 'PUT' && /\/api\/Expenses\/\d+\/status$/.test(path)) {
@@ -171,7 +186,7 @@ test.describe('role workspaces', () => {
       amount: 42,
       expenseDate: '2026-01-15T00:00:00',
       receiptUrl: null,
-      status: 'Pending',
+      status: 'Pending Approval',
       createdAt: '2026-01-15T10:00:00Z',
       rowVersion: 'AQIDBAUGBwg=',
     };
