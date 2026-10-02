@@ -8,6 +8,7 @@ public class Budget
     public int FiscalQuarter { get; set; }
     public decimal AllocatedAmount { get; set; }
     public decimal RemainingAmount { get; set; }
+    public byte[] RowVersion { get; set; } = [];
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public Department Department { get; set; } = null!;

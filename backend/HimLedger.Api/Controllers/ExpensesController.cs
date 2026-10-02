@@ -22,30 +22,15 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         [FromQuery, Range(1, 21_474_836)] int page = 1,
         [FromQuery, Range(1, 100)] int pageSize = 25)
     {
-        var expensesQuery = context.Expenses.AsQueryable();
-        if (User.IsInRole("Employee"))
+        if (!TryGetCallerId(out var callerId))
         {
-            if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
-            {
-                return Problem(
-                    statusCode: StatusCodes.Status401Unauthorized,
-                    title: "Unauthorized",
-                    detail: "The authenticated user identifier is invalid.");
-            }
-
-            expensesQuery = expensesQuery.Where(expense => expense.UserId == userId);
+            return Unauthorized();
         }
-        else if (User.IsInRole("Manager"))
-        {
-            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
-            {
-                return Problem(
-                    statusCode: StatusCodes.Status401Unauthorized,
-                    title: "Unauthorized",
-                    detail: "The authenticated department identifier is invalid.");
-            }
 
-            expensesQuery = expensesQuery.Where(expense => expense.DepartmentId == departmentId);
+        var expensesQuery = await ScopeExpensesToCallerAsync(context.Expenses, callerId, cancellationToken);
+        if (expensesQuery is null)
+        {
+            return Unauthorized();
         }
 
         var expenses = await expensesQuery
@@ -59,30 +44,18 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<ActionResult<ExpenseResponseDto>> GetExpense(int id, CancellationToken cancellationToken)
     {
-        var expenseQuery = context.Expenses.Where(expense => expense.ExpenseId == id);
-        if (User.IsInRole("Employee"))
+        if (!TryGetCallerId(out var callerId))
         {
-            if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var userId))
-            {
-                return Problem(
-                    statusCode: StatusCodes.Status401Unauthorized,
-                    title: "Unauthorized",
-                    detail: "The authenticated user identifier is invalid.");
-            }
-
-            expenseQuery = expenseQuery.Where(expense => expense.UserId == userId);
+            return Unauthorized();
         }
-        else if (User.IsInRole("Manager"))
-        {
-            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
-            {
-                return Problem(
-                    statusCode: StatusCodes.Status401Unauthorized,
-                    title: "Unauthorized",
-                    detail: "The authenticated department identifier is invalid.");
-            }
 
-            expenseQuery = expenseQuery.Where(expense => expense.DepartmentId == departmentId);
+        var expenseQuery = await ScopeExpensesToCallerAsync(
+            context.Expenses.Where(expense => expense.ExpenseId == id),
+            callerId,
+            cancellationToken);
+        if (expenseQuery is null)
+        {
+            return Unauthorized();
         }
 
         var expense = await expenseQuery
@@ -97,15 +70,23 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         [FromBody] CreateExpenseDto request,
         CancellationToken cancellationToken)
     {
-        var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (!int.TryParse(userIdClaim, out var userId))
+        if (!TryGetCallerId(out var userId))
         {
-            return Problem(
-                statusCode: StatusCodes.Status401Unauthorized,
-                title: "Unauthorized",
-                detail: "The authenticated user identifier is invalid.");
+            return Unauthorized();
         }
 
+        var caller = await context.Users
+            .Where(user => user.UserId == userId)
+            .Select(user => new { user.DepartmentId })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (caller?.DepartmentId is not int assignedDepartmentId)
+        {
+            return Forbid();
+        }
+        if (request.DepartmentId != assignedDepartmentId)
+        {
+            return Forbid();
+        }
         if (request.Amount <= 0)
         {
             return Problem(
@@ -118,7 +99,7 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         {
             UserId = userId,
             CategoryId = request.CategoryId,
-            DepartmentId = request.DepartmentId,
+            DepartmentId = assignedDepartmentId,
             Title = request.Title,
             Description = request.Description,
             Amount = request.Amount,
@@ -153,36 +134,43 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
                 detail: "Status must be Approved or Rejected.");
         }
 
-        var expense = await context.Expenses.FindAsync([id], cancellationToken);
+        if (!TryGetCallerId(out var reviewerId))
+        {
+            return Unauthorized();
+        }
+
+        var expenseQuery = context.Expenses.Where(item => item.ExpenseId == id);
+        if (User.IsInRole("Manager"))
+        {
+            var departmentId = await context.Users
+                .Where(user => user.UserId == reviewerId)
+                .Select(user => user.DepartmentId)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (departmentId is null)
+            {
+                return Forbid();
+            }
+            expenseQuery = expenseQuery.Where(item => item.DepartmentId == departmentId);
+        }
+
+        var expense = await expenseQuery.SingleOrDefaultAsync(cancellationToken);
         if (expense is null)
         {
             return NotFound();
         }
-
-        if (User.IsInRole("Manager"))
+        if (expense.Status != "Pending")
         {
-            if (!int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId))
-            {
-                return Problem(
-                    statusCode: StatusCodes.Status401Unauthorized,
-                    title: "Unauthorized",
-                    detail: "The authenticated department identifier is invalid.");
-            }
-
-            if (expense.DepartmentId != departmentId)
-            {
-                return Forbid();
-            }
+            return Conflict("Only pending claims can be reviewed.");
         }
 
-        var reviewerIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (!int.TryParse(reviewerIdClaim, out var reviewerId))
+        if (!TryDecodeRowVersion(request.RowVersion, out var rowVersion))
         {
             return Problem(
-                statusCode: StatusCodes.Status401Unauthorized,
-                title: "Unauthorized",
-                detail: "The authenticated user identifier is invalid.");
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Bad Request",
+                detail: "A valid claim row version is required.");
         }
+        context.Entry(expense).Property(item => item.RowVersion).OriginalValue = rowVersion;
 
         expense.Status = request.Status;
         context.ApprovalLogs.Add(new ApprovalLog
@@ -193,8 +181,56 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
             Comments = request.Comments
         });
 
-        await context.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict("The claim changed after it was loaded. Refresh and try again.");
+        }
         return NoContent();
+    }
+
+    private bool TryGetCallerId(out int userId) =>
+        int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId);
+
+    private async Task<IQueryable<Expense>?> ScopeExpensesToCallerAsync(
+        IQueryable<Expense> query,
+        int callerId,
+        CancellationToken cancellationToken)
+    {
+        if (User.IsInRole("Employee"))
+        {
+            return query.Where(expense => expense.UserId == callerId);
+        }
+
+        if (User.IsInRole("Manager"))
+        {
+            var departmentId = await context.Users
+                .Where(user => user.UserId == callerId)
+                .Select(user => user.DepartmentId)
+                .SingleOrDefaultAsync(cancellationToken);
+            return departmentId is null
+                ? null
+                : query.Where(expense => expense.DepartmentId == departmentId);
+        }
+
+        return User.IsInRole("Admin") || User.IsInRole("Finance") ? query : null;
+    }
+
+    private static bool TryDecodeRowVersion(string value, out byte[] rowVersion)
+    {
+        try
+        {
+            rowVersion = Convert.FromBase64String(value);
+            return rowVersion.Length == 8;
+        }
+        catch (FormatException)
+        {
+            rowVersion = [];
+            return false;
+        }
     }
 
     private static readonly Expression<Func<Expense, ExpenseResponseDto>> ResponseProjection = expense => new(
@@ -211,5 +247,6 @@ public class ExpensesController(ApplicationDbContext context) : ControllerBase
         expense.ExpenseDate,
         expense.ReceiptUrl,
         expense.Status,
-        expense.CreatedAt);
+        expense.CreatedAt,
+        Convert.ToBase64String(expense.RowVersion));
 }

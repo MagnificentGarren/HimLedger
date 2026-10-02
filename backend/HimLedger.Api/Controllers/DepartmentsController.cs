@@ -19,7 +19,27 @@ public class DepartmentsController(ApplicationDbContext context) : ControllerBas
         [FromQuery, Range(1, 21_474_836)] int page = 1,
         [FromQuery, Range(1, 100)] int pageSize = 25)
     {
-        var departments = await context.Departments
+        var departmentsQuery = context.Departments.AsQueryable();
+        if (User.IsInRole("Employee") || User.IsInRole("Manager"))
+        {
+            if (!int.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out var userId))
+            {
+                return Unauthorized();
+            }
+            var departmentId = await context.Users
+                .Where(user => user.UserId == userId)
+                .Select(user => user.DepartmentId)
+                .SingleOrDefaultAsync(cancellationToken);
+            departmentsQuery = departmentId is int assignedDepartmentId
+                ? departmentsQuery.Where(department => department.DepartmentId == assignedDepartmentId)
+                : departmentsQuery.Where(_ => false);
+        }
+        else if (!User.IsInRole("Admin") && !User.IsInRole("Finance"))
+        {
+            return Forbid();
+        }
+
+        var departments = await departmentsQuery
             .OrderBy(department => department.Name)
             .ThenBy(department => department.DepartmentId)
             .Select(department => new

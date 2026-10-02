@@ -1,4 +1,8 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using HimLedger.Api;
 using HimLedger.Infrastructure;
 using HimLedger.Infrastructure.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -50,16 +54,79 @@ builder.Services.AddSwaggerGen(options =>
 });
 builder.Services.AddScoped<JwtTokenService>();
 
-var jwtSecret = builder.Configuration["JwtSettings:Secret"]
-    ?? throw new InvalidOperationException("JwtSettings:Secret must be configured.");
-if (Encoding.UTF8.GetByteCount(jwtSecret) < 32)
+var jwtSecret = builder.Configuration["JwtSettings:Secret"];
+if (string.IsNullOrWhiteSpace(jwtSecret) && builder.Environment.IsDevelopment())
+{
+    jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    builder.Configuration["JwtSettings:Secret"] = jwtSecret;
+}
+if (jwtSecret is not null && Encoding.UTF8.GetByteCount(jwtSecret) < 32)
 {
     throw new InvalidOperationException("JwtSettings:Secret must be at least 32 bytes.");
 }
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+var entraAuthority = builder.Configuration["EntraId:Authority"]?.TrimEnd('/');
+var entraAudience = builder.Configuration["EntraId:Audience"];
+if (string.IsNullOrWhiteSpace(entraAuthority) != string.IsNullOrWhiteSpace(entraAudience))
+{
+    throw new InvalidOperationException("EntraId:Authority and EntraId:Audience must both be configured.");
+}
+if (jwtSecret is null && string.IsNullOrWhiteSpace(entraAuthority))
+{
+    throw new InvalidOperationException("Configure Entra ID or a local JWT secret before starting the API.");
+}
+
+builder.Services.AddAuthentication(options =>
     {
+        options.DefaultAuthenticateScheme = "HimLedgerBearer";
+        options.DefaultChallengeScheme = "HimLedgerBearer";
+    })
+    .AddPolicyScheme("HimLedgerBearer", "Entra ID or local JWT", options =>
+    {
+        options.ForwardDefaultSelector = context =>
+        {
+            var token = context.Request.Headers.Authorization.ToString();
+            if (token.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var issuer = new JwtSecurityTokenHandler()
+                        .ReadJwtToken(token["Bearer ".Length..])
+                        .Issuer;
+                    if (!string.IsNullOrWhiteSpace(entraAuthority)
+                        && issuer.StartsWith(entraAuthority, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "Entra";
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // Malformed tokens are sent to the local handler and rejected there.
+                }
+                catch (SecurityTokenException)
+                {
+                    // Malformed tokens are sent to the local handler and rejected there.
+                }
+            }
+
+            return "LocalJwt";
+        };
+    })
+    .AddJwtBearer("LocalJwt", options =>
+    {
+        if (jwtSecret is null)
+        {
+            options.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = context =>
+                {
+                    context.Fail("Local JWT authentication is not configured.");
+                    return Task.CompletedTask;
+                }
+            };
+            return;
+        }
+
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -70,7 +137,31 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret))
         };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = context => InternalIdentityClaims.ResolveAsync(context, isEntraToken: false)
+        };
     });
+if (!string.IsNullOrWhiteSpace(entraAuthority))
+{
+    builder.Services.AddAuthentication()
+        .AddJwtBearer("Entra", options =>
+        {
+            options.Authority = entraAuthority;
+            options.Audience = entraAudience;
+            options.MapInboundClaims = false;
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true
+            };
+            options.Events = new JwtBearerEvents
+            {
+                OnTokenValidated = context => InternalIdentityClaims.ResolveAsync(context, isEntraToken: true)
+            };
+        });
+}
 
 builder.Services.AddAuthorization();
 builder.Services.AddCors(options =>
@@ -94,7 +185,7 @@ app.UseStatusCodePages();
 
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger(options => options.SerializeAsV2 = true);
+    app.UseSwagger();
     app.UseSwaggerUI(options =>
     {
         options.SwaggerEndpoint("/swagger/v1/swagger.json", "HimLedger API v1");

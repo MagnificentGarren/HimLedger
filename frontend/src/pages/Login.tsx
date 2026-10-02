@@ -1,31 +1,72 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, LockKeyhole, Mail } from 'lucide-react';
 import { isAxiosError } from 'axios';
 import { Link } from 'react-router-dom';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 import api from '../api/axios';
-import { useAuth } from '../context/auth';
+import type { LoginDto } from '../api/generated/types.gen';
+import { useAuth, workspacePathForRole } from '../context/auth';
+import { beginEntraSignIn, completeEntraSignIn, isEntraConfigured } from '../auth/entra';
 import { BrandMark } from './PublicSite';
 
+const loginSchema = z.object({
+  email: z.email('Enter a valid work email.'),
+  password: z.string().min(1, 'Enter your password.'),
+});
+type LoginFormValues = z.infer<typeof loginSchema>;
+interface CurrentUser {
+  userId: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+  departmentId: number | null;
+}
+
 export const Login: React.FC = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const localLoginEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_LOCAL_LOGIN === 'true';
+  const form = useForm<LoginFormValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: '', password: '' },
+  });
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
+  useEffect(() => {
+    let active = true;
+    void completeEntraSignIn()
+      .then(async (result) => {
+        if (!active || !result?.accessToken) return;
+        const { data: user } = await api.get<CurrentUser>('/Auth/me', {
+          headers: { Authorization: `Bearer ${result.accessToken}` },
+        });
+        if (!active) return;
+        login(result.accessToken, user, 'entra');
+        navigate(workspacePathForRole(user.role), { replace: true });
+      })
+      .catch((cause: unknown) => {
+        console.error('Entra sign-in could not be completed', cause);
+        if (active) setError('Company sign-in could not be completed. Try again or contact your administrator.');
+      });
+    return () => { active = false; };
+  }, [login, navigate]);
+
+  const handleSubmit = async ({ email, password }: LoginFormValues) => {
     setError('');
     setIsSubmitting(true);
 
     try {
-      const response = await api.post('/Auth/login', { email, password });
+      const request: LoginDto = { email, password };
+      const response = await api.post('/Auth/login', request);
       const { token, userId, firstName, lastName, role } = response.data;
 
       login(token, { userId, firstName, lastName, email, role });
-      navigate('/dashboard');
+      navigate(workspacePathForRole(role), { replace: true });
     } catch (err: unknown) {
       const message = isAxiosError<{ detail?: string; message?: string }>(err)
         ? err.response?.data?.detail ?? err.response?.data?.message
@@ -36,6 +77,16 @@ export const Login: React.FC = () => {
         : 'Login failed. Check your credentials.'));
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleEntraSignIn = async () => {
+    setError('');
+    try {
+      await beginEntraSignIn();
+    } catch (cause: unknown) {
+      console.error('Entra sign-in could not be started', cause);
+      setError('Company sign-in could not be started. Try again or contact your administrator.');
     }
   };
 
@@ -64,43 +115,31 @@ export const Login: React.FC = () => {
 
           {error && <div role="alert" className="login-error">{error}</div>}
 
-          <form onSubmit={handleSubmit} className="login-form">
+          {isEntraConfigured && <button type="button" className="login-submit" onClick={() => void handleEntraSignIn()}>
+            Sign in with your organization <ArrowRight size={17} aria-hidden="true" />
+          </button>}
+          {isEntraConfigured && localLoginEnabled && <p className="login-panel-foot">or use local development sign-in</p>}
+          {localLoginEnabled ? <form onSubmit={form.handleSubmit(handleSubmit)} className="login-form">
             <div className="login-field">
               <label htmlFor="login-email">Work email</label>
               <div className="login-input-wrap">
                 <Mail aria-hidden="true" />
-                <input
-                  id="login-email"
-                  type="email"
-                  autoComplete="username"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  required
-                  placeholder="name@company.com"
-                />
+                <input id="login-email" type="email" autoComplete="username" {...form.register('email')} placeholder="name@company.com" />
               </div>
+              {form.formState.errors.email && <small role="alert" className="login-error">{form.formState.errors.email.message}</small>}
             </div>
-
             <div className="login-field">
               <label htmlFor="login-password">Password</label>
               <div className="login-input-wrap">
                 <LockKeyhole aria-hidden="true" />
-                <input
-                  id="login-password"
-                  type="password"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  required
-                  placeholder="Enter your password"
-                />
+                <input id="login-password" type="password" autoComplete="current-password" {...form.register('password')} placeholder="Enter your password" />
               </div>
+              {form.formState.errors.password && <small role="alert" className="login-error">{form.formState.errors.password.message}</small>}
             </div>
-
             <button type="submit" className="login-submit" disabled={isSubmitting}>
               {isSubmitting ? 'Signing in...' : 'Sign in'} <ArrowRight size={17} aria-hidden="true" />
             </button>
-          </form>
+          </form> : !isEntraConfigured && <p role="status">Company sign-in is not configured. Contact your administrator.</p>}
           <div className="login-panel-foot">HimLedger · Expense operations</div>
         </section>
       </div>

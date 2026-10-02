@@ -1,19 +1,24 @@
 import React from 'react';
 import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
-import { useAuth } from './context/auth';
+import { useAuth, workspacePathForRole } from './context/auth';
 import { AppWorkspace } from './pages/AppWorkspace';
-import { AuditLogsPage } from './pages/AuditLogs';
-import { BudgetsPage } from './pages/Budgets';
-import { ClaimsPage } from './pages/Claims';
-import { DepartmentsAdminPage } from './pages/DepartmentsAdmin';
 import { Login } from './pages/Login';
 import { ArchitecturePage, FeaturesPage, HomePage, PricingPage } from './pages/PublicSite';
 
-const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { token } = useAuth();
+export type Role = 'Employee' | 'Manager' | 'Finance' | 'Admin';
 
-  return token ? <>{children}</> : <Navigate to="/login" replace />;
+export const RoleWorkspace: React.FC<{ role: Role }> = ({ role }) => {
+  const { token, user } = useAuth();
+  if (!token || !user) return <Navigate to="/login" replace />;
+  return user.role === role
+    ? <AppWorkspace />
+    : <Navigate to={workspacePathForRole(user.role)} replace />;
+};
+
+const RoleRedirect: React.FC = () => {
+  const { token, user } = useAuth();
+  return token && user ? <Navigate to={workspacePathForRole(user.role)} replace /> : <Navigate to="/login" replace />;
 };
 
 export const App: React.FC = () => {
@@ -26,24 +31,13 @@ export const App: React.FC = () => {
           <Route path="/about" element={<ArchitecturePage />} />
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/login" element={<Login />} />
-          <Route
-            path="/app/*"
-            element={
-              <ProtectedRoute>
-                <AppWorkspace />
-              </ProtectedRoute>
-            }
-          />
-          <Route path="/workspace" element={<Navigate to="/workspace/overview" replace />} />
-          <Route path="/workspace/overview" element={<ProtectedRoute><AppWorkspace /></ProtectedRoute>} />
-          <Route path="/workspace/claims" element={<ProtectedRoute><ClaimsPage /></ProtectedRoute>} />
-          <Route path="/workspace/budgets" element={<ProtectedRoute><BudgetsPage /></ProtectedRoute>} />
-          <Route path="/workspace/audit-logs" element={<ProtectedRoute><AuditLogsPage /></ProtectedRoute>} />
-          <Route path="/workspace/departments" element={<ProtectedRoute><DepartmentsAdminPage /></ProtectedRoute>} />
-          <Route path="/workspace/user-roles" element={<ProtectedRoute><DepartmentsAdminPage /></ProtectedRoute>} />
-          <Route path="/workspace/users" element={<ProtectedRoute><AppWorkspace /></ProtectedRoute>} />
-          <Route path="/workspace/*" element={<ProtectedRoute><AppWorkspace /></ProtectedRoute>} />
-          <Route path="/dashboard" element={<Navigate to="/app/dashboard" replace />} />
+          <Route path="/employee/*" element={<RoleWorkspace role="Employee" />} />
+          <Route path="/manager/*" element={<RoleWorkspace role="Manager" />} />
+          <Route path="/finance/*" element={<RoleWorkspace role="Finance" />} />
+          <Route path="/admin/*" element={<RoleWorkspace role="Admin" />} />
+          <Route path="/app/*" element={<RoleRedirect />} />
+          <Route path="/workspace/*" element={<RoleRedirect />} />
+          <Route path="/dashboard" element={<RoleRedirect />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Router>

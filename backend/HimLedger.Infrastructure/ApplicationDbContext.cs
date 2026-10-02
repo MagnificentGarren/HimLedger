@@ -53,7 +53,8 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.HasData(
                 new Role { RoleId = 1, Name = "Admin" },
                 new Role { RoleId = 2, Name = "Manager" },
-                new Role { RoleId = 3, Name = "Employee" });
+                new Role { RoleId = 3, Name = "Employee" },
+                new Role { RoleId = 4, Name = "Finance" });
         });
 
         modelBuilder.Entity<User>(entity =>
@@ -62,8 +63,13 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(user => user.LastName).HasMaxLength(50);
             entity.Property(user => user.Email).HasMaxLength(100);
             entity.Property(user => user.PasswordHash).HasMaxLength(255);
+            entity.Property(user => user.EntraTenantId).HasMaxLength(36);
+            entity.Property(user => user.EntraObjectId).HasMaxLength(36);
             entity.Property(user => user.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.HasIndex(user => user.Email).IsUnique();
+            entity.HasIndex(user => new { user.EntraTenantId, user.EntraObjectId })
+                .IsUnique()
+                .HasFilter("[EntraTenantId] IS NOT NULL AND [EntraObjectId] IS NOT NULL");
             entity.HasData(SeedAdminUser);
             entity.HasOne(user => user.Role)
                 .WithMany(role => role.Users)
@@ -92,6 +98,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(budget => budget.AllocatedAmount).HasPrecision(18, 2);
             entity.Property(budget => budget.RemainingAmount).HasPrecision(18, 2);
             entity.Property(budget => budget.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
+            entity.Property(budget => budget.RowVersion).IsRowVersion();
             entity.HasIndex(budget => new { budget.DepartmentId, budget.FiscalYear, budget.FiscalQuarter }).IsUnique();
             entity.HasIndex(budget => budget.DepartmentId);
             entity.ToTable(table =>
@@ -113,6 +120,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(expense => expense.ExpenseDate).HasColumnType("date");
             entity.Property(expense => expense.ReceiptUrl).HasMaxLength(2083);
             entity.Property(expense => expense.Status).HasMaxLength(20).HasDefaultValue("Pending");
+            entity.Property(expense => expense.RowVersion).IsRowVersion();
             entity.Property(expense => expense.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.HasIndex(expense => new { expense.DepartmentId, expense.Status });
             entity.HasIndex(expense => expense.UserId);

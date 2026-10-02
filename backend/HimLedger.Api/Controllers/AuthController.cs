@@ -2,6 +2,7 @@ using HimLedger.Application.DTOs;
 using HimLedger.Domain.Entities;
 using HimLedger.Infrastructure;
 using HimLedger.Infrastructure.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -12,13 +13,22 @@ namespace HimLedger.Api.Controllers;
 [Route("api/[controller]")]
 public class AuthController(
     ApplicationDbContext context,
-    JwtTokenService jwtService) : ControllerBase
+    JwtTokenService jwtService,
+    IConfiguration configuration) : ControllerBase
 {
     private readonly PasswordHasher<User> _passwordHasher = new();
 
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginDto request, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(configuration["JwtSettings:Secret"]))
+        {
+            return Problem(
+                statusCode: StatusCodes.Status501NotImplemented,
+                title: "Not Implemented",
+                detail: "Password login is disabled. Sign in with your organization's Entra ID account.");
+        }
+
         var user = await context.Users
             .Include(user => user.Role)
             .FirstOrDefaultAsync(user => user.Email == request.Email, cancellationToken);
@@ -61,9 +71,40 @@ public class AuthController(
             token));
     }
 
+    [Authorize]
+    [HttpGet("me")]
+    public async Task<IActionResult> GetCurrentUser(CancellationToken cancellationToken)
+    {
+        if (!int.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out var userId))
+        {
+            return Unauthorized();
+        }
+        var user = await context.Users
+            .Where(item => item.UserId == userId)
+            .Select(item => new
+            {
+                item.UserId,
+                item.FirstName,
+                item.LastName,
+                item.Email,
+                Role = item.Role.Name,
+                item.DepartmentId
+            })
+            .SingleOrDefaultAsync(cancellationToken);
+        return user is null ? Unauthorized() : Ok(user);
+    }
+
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterUserDto request, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(configuration["JwtSettings:Secret"]))
+        {
+            return Problem(
+                statusCode: StatusCodes.Status501NotImplemented,
+                title: "Not Implemented",
+                detail: "Public registration is disabled. Ask an administrator to provision your account.");
+        }
+
         if (await context.Users.AnyAsync(user => user.Email == request.Email, cancellationToken))
         {
             return Problem(
@@ -91,24 +132,13 @@ public class AuthController(
                 detail: "Public registration is restricted to the Employee role.");
         }
 
-        if (request.DepartmentId is int departmentId &&
-            !await context.Departments.AnyAsync(
-                department => department.DepartmentId == departmentId,
-                cancellationToken))
-        {
-            return Problem(
-                statusCode: StatusCodes.Status400BadRequest,
-                title: "Bad Request",
-                detail: "Department does not exist.");
-        }
-
         var user = new User
         {
             FirstName = request.FirstName,
             LastName = request.LastName,
             Email = request.Email,
             RoleId = employeeRole.RoleId,
-            DepartmentId = request.DepartmentId
+            DepartmentId = null
         };
         user.PasswordHash = _passwordHasher.HashPassword(user, request.Password);
 

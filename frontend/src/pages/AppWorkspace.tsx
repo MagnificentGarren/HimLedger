@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowDownToLine, BadgeCheck, Bell, Building2, CalendarDays,
@@ -6,24 +10,10 @@ import {
   LogOut, Menu, Plus, Receipt, Search, ShieldCheck, WalletCards, X,
 } from 'lucide-react';
 import api, { getAllPages } from '../api/axios';
+import type { CreateExpenseDto, Expense as ApiExpense, UpdateBudgetRequest, UpdateExpenseStatusDto } from '../api/models';
 import { useAuth } from '../context/auth';
 
-interface Expense {
-  expenseId: number;
-  userId: number;
-  userFullName: string;
-  categoryId: number;
-  categoryName: string;
-  departmentId: number;
-  departmentName: string;
-  title: string;
-  description: string | null;
-  amount: number;
-  expenseDate: string;
-  receiptUrl: string | null;
-  status: string;
-  createdAt: string;
-}
+type Expense = ApiExpense;
 
 interface Category { categoryId: number; name: string }
 interface Department { departmentId: number; name: string; code: string }
@@ -34,7 +24,10 @@ interface ManagedUser {
   email: string;
   roleId: number;
   roleName: string;
+  departmentId: number | null;
   departmentName: string | null;
+  entraTenantId: string | null;
+  entraObjectId: string | null;
 }
 interface UserRole { roleId: number; name: string }
 interface Budget {
@@ -46,6 +39,7 @@ interface Budget {
   allocatedAmount: number;
   spentAmount: number;
   remainingAmount: number;
+  rowVersion: string;
 }
 interface AuditRecord {
   approvalLogId: number;
@@ -61,20 +55,31 @@ const money = (value: number) => `R ${value.toLocaleString('en-ZA', { minimumFra
 const dateLabel = (value: string) => new Date(value).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' });
 const currentQuarter = Math.floor(new Date().getMonth() / 3) + 1;
 const currentYear = new Date().getFullYear();
+const emptyExpenses: Expense[] = [];
+const emptyCategories: Category[] = [];
+const emptyDepartments: Department[] = [];
+const claimSchema = z.object({
+  title: z.string().trim().min(1, 'Enter an expense title.').max(200),
+  categoryId: z.string().min(1, 'Select a category.'),
+  departmentId: z.string().min(1, 'Select a department.'),
+  amount: z.string().regex(/^(?:\d+)(?:\.\d{1,2})?$/, 'Enter an amount with up to two decimal places.')
+    .refine((value) => Number(value) > 0, 'Amount must be greater than zero.'),
+  expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Select a valid expense date.'),
+  description: z.string().max(500, 'Notes cannot exceed 500 characters.'),
+});
+type ClaimFormValues = z.infer<typeof claimSchema>;
+interface WorkspaceCore {
+  expenses: Expense[];
+  categories: Category[];
+  departments: Department[];
+}
 
 export const AppWorkspace = () => {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
-  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
-  const [roles, setRoles] = useState<UserRole[]>([]);
+  const queryClient = useQueryClient();
   const [roleChanges, setRoleChanges] = useState<Record<number, number>>({});
-  const [budgets, setBudgets] = useState<Budget[]>([]);
-  const [auditRecords, setAuditRecords] = useState<AuditRecord[]>([]);
-  const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All statuses');
@@ -86,21 +91,39 @@ export const AppWorkspace = () => {
   const [showClaimForm, setShowClaimForm] = useState(false);
   const [showBudgetForm, setShowBudgetForm] = useState(false);
   const [showDepartmentForm, setShowDepartmentForm] = useState(false);
+  const [showUserForm, setShowUserForm] = useState(false);
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
+  const [identityTarget, setIdentityTarget] = useState<ManagedUser | null>(null);
   const [reviewTarget, setReviewTarget] = useState<Expense | null>(null);
   const [reviewAction, setReviewAction] = useState<'Approved' | 'Rejected'>('Approved');
   const [reviewComment, setReviewComment] = useState('');
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [claim, setClaim] = useState({ title: '', categoryId: '', departmentId: '', amount: '', expenseDate: new Date().toISOString().slice(0, 10), description: '' });
+  const claimForm = useForm<ClaimFormValues>({
+    resolver: zodResolver(claimSchema),
+    defaultValues: {
+      title: '',
+      categoryId: '',
+      departmentId: '',
+      amount: '',
+      expenseDate: new Date().toISOString().slice(0, 10),
+      description: '',
+    },
+  });
   const [allocation, setAllocation] = useState({ departmentId: '', amount: '' });
   const [departmentForm, setDepartmentForm] = useState({ name: '', code: '' });
+  const [managedUserForm, setManagedUserForm] = useState({ firstName: '', lastName: '', email: '', roleId: '', departmentId: '' });
+  const [entraIdentityForm, setEntraIdentityForm] = useState({ tenantId: '', objectId: '' });
+  const [departmentChanges, setDepartmentChanges] = useState<Record<number, string>>({});
 
   const role = user?.role ?? 'Employee';
   const isAdmin = role === 'Admin';
   const isManager = role === 'Manager';
+  const isFinance = role === 'Finance';
   const canReview = isAdmin || isManager;
-  const routeBase = location.pathname.startsWith('/workspace') ? '/workspace' : '/app';
+  const canSeeBudgets = canReview || isFinance;
+  const canSeeAudit = isAdmin || isFinance;
+  const routeBase = `/${location.pathname.split('/')[1]}`;
   const activePage = location.pathname.replace(/\/$/, '').split('/').pop() ?? 'dashboard';
   const normalizedPage = activePage === 'overview' ? 'dashboard' : activePage;
   const isClaims = normalizedPage === 'claims';
@@ -108,60 +131,63 @@ export const AppWorkspace = () => {
   const isAudit = normalizedPage === 'audit-logs';
   const isDepartments = normalizedPage === 'departments';
   const isUsers = normalizedPage === 'users' || normalizedPage === 'user-roles';
+  const canSubmitClaim = role === 'Employee' || isManager;
+  const coreKey = ['workspace-core', user?.userId] as const;
+  const coreQuery = useQuery({
+    queryKey: coreKey,
+    queryFn: async (): Promise<WorkspaceCore> => {
+      const [expenses, categories, departments] = await Promise.all([
+        getAllPages<Expense>('/Expenses'),
+        getAllPages<Category>('/Categories'),
+        getAllPages<Department>('/Departments'),
+      ]);
+      return { expenses, categories, departments };
+    },
+  });
+  const expenses = coreQuery.data?.expenses ?? emptyExpenses;
+  const categories = coreQuery.data?.categories ?? emptyCategories;
+  const departments = coreQuery.data?.departments ?? emptyDepartments;
+  const updateExpenses = (update: (items: Expense[]) => Expense[]) => {
+    queryClient.setQueryData<WorkspaceCore>(coreKey, (current) => current
+      ? { ...current, expenses: update(current.expenses) }
+      : current);
+  };
+  const budgetsQuery = useQuery({
+    queryKey: ['budgets', user?.userId, year, quarter],
+    queryFn: () => getAllPages<Budget>('/Budgets', { fiscalYear: year, fiscalQuarter: quarter }),
+    enabled: isBudgets || activePage === 'dashboard',
+  });
+  const budgets = budgetsQuery.data ?? [];
+  const auditQuery = useQuery({
+    queryKey: ['audit-records', user?.userId],
+    queryFn: () => getAllPages<AuditRecord>('/AuditLogs'),
+    enabled: isAudit && canSeeAudit,
+  });
+  const auditRecords = auditQuery.data ?? [];
+  const usersQuery = useQuery({
+    queryKey: ['managed-users', user?.userId],
+    queryFn: async () => {
+      const [users, { data: roles }] = await Promise.all([
+        getAllPages<ManagedUser>('/Users'),
+        api.get<UserRole[]>('/Users/roles'),
+      ]);
+      return { users, roles };
+    },
+    enabled: isUsers && isAdmin,
+  });
+  const managedUsers = usersQuery.data?.users ?? [];
+  const roles = usersQuery.data?.roles ?? [];
+  const loading = coreQuery.isLoading;
 
-  useEffect(() => {
-    const loadCoreData = async () => {
-      try {
-        const [loadedExpenses, loadedCategories, loadedDepartments] = await Promise.all([
-          getAllPages<Expense>('/Expenses'),
-          getAllPages<Category>('/Categories'),
-          getAllPages<Department>('/Departments'),
-        ]);
-        setExpenses(loadedExpenses);
-        setCategories(loadedCategories);
-        setDepartments(loadedDepartments);
-      } catch (error) {
-        console.error('Failed to load workspace data', error);
-        setPageError('Workspace data could not be loaded. Refresh and try again.');
-      } finally {
-        setLoading(false);
-      }
-    };
-    void loadCoreData();
-  }, []);
-
-  useEffect(() => {
-    if (!isBudgets && activePage !== 'dashboard') return;
-    getAllPages<Budget>('/Budgets', { fiscalYear: year, fiscalQuarter: quarter })
-      .then(setBudgets)
-      .catch((error: unknown) => {
-        console.error('Failed to load budgets', error);
-        setPageError('Budget data could not be loaded for this period.');
-      });
-  }, [activePage, isBudgets, quarter, year]);
-
-  useEffect(() => {
-    if (!isAudit) return;
-    getAllPages<AuditRecord>('/AuditLogs')
-      .then(setAuditRecords)
-      .catch((error: unknown) => {
-        console.error('Failed to load audit records', error);
-        setPageError('Audit records could not be loaded.');
-      });
-  }, [isAudit]);
-
-  useEffect(() => {
-    if (!isUsers) return;
-    Promise.all([
-      getAllPages<ManagedUser>('/Users'),
-      api.get<UserRole[]>('/Users/roles'),
-    ])
-      .then(([users, { data: userRoles }]) => { setManagedUsers(users); setRoles(userRoles); })
-      .catch((error: unknown) => {
-        console.error('Failed to load user roles', error);
-        setPageError('User role data could not be loaded.');
-      });
-  }, [isUsers]);
+  const queryErrorMessage = coreQuery.error
+    ? 'Workspace data could not be loaded. Refresh and try again.'
+    : budgetsQuery.error
+      ? 'Budget data could not be loaded for this period.'
+      : auditQuery.error
+        ? 'Audit records could not be loaded.'
+        : usersQuery.error
+          ? 'User role data could not be loaded.'
+          : '';
 
   const visibleExpenses = useMemo(() => expenses.filter((expense) => {
     const matchesQuery = `${expense.title} ${expense.userFullName} ${expense.categoryName} ${expense.departmentName} ${expense.expenseId}`.toLowerCase().includes(query.toLowerCase());
@@ -181,31 +207,31 @@ export const AppWorkspace = () => {
   const navItems = [
     { to: `${routeBase}/dashboard`, label: 'Overview', icon: LayoutDashboard, visible: true },
     { to: `${routeBase}/claims`, label: role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims', icon: Receipt, visible: true },
-    { to: `${routeBase}/budgets`, label: isManager ? 'Department budget' : 'Budgets', icon: WalletCards, visible: canReview },
-    { to: `${routeBase}/audit-logs`, label: 'Audit logs', icon: ShieldCheck, visible: isAdmin },
+    { to: `${routeBase}/budgets`, label: isManager ? 'Department budget' : 'Budgets', icon: WalletCards, visible: canSeeBudgets },
+    { to: `${routeBase}/audit-logs`, label: 'Audit logs', icon: ShieldCheck, visible: canSeeAudit },
     { to: `${routeBase}/departments`, label: 'Departments', icon: Building2, visible: isAdmin },
     { to: `${routeBase}/user-roles`, label: 'User roles', icon: ShieldCheck, visible: isAdmin },
   ].filter((item) => item.visible);
 
   const handleLogout = () => { logout(); navigate('/login'); };
 
-  const handleClaimSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handleClaimSubmit = async (values: ClaimFormValues) => {
     setBusy(true);
     setFormError('');
     try {
-      const { data } = await api.post<Expense>('/Expenses', {
-        title: claim.title,
-        categoryId: Number(claim.categoryId),
-        departmentId: Number(claim.departmentId),
-        amount: Number(claim.amount),
-        expenseDate: `${claim.expenseDate}T00:00:00`,
-        description: claim.description || null,
+      const request = {
+        title: values.title,
+        categoryId: Number(values.categoryId),
+        departmentId: Number(values.departmentId),
+        amount: Number(values.amount),
+        expenseDate: `${values.expenseDate}T00:00:00`,
+        description: values.description || null,
         receiptUrl: null,
-      });
-      setExpenses((current) => [data, ...current]);
+      } satisfies CreateExpenseDto;
+      const { data } = await api.post<Expense>('/Expenses', request);
+      updateExpenses((current) => [data, ...current]);
       setShowClaimForm(false);
-      setClaim({ title: '', categoryId: '', departmentId: '', amount: '', expenseDate: new Date().toISOString().slice(0, 10), description: '' });
+      claimForm.reset();
     } catch (error) {
       console.error('Failed to submit claim', error);
       setFormError('The claim could not be submitted. Check the details and try again.');
@@ -218,8 +244,13 @@ export const AppWorkspace = () => {
     setBusy(true);
     setFormError('');
     try {
-      await api.put(`/Expenses/${reviewTarget.expenseId}/status`, { status: reviewAction, comments: reviewComment.trim() || null });
-      setExpenses((current) => current.map((item) => item.expenseId === reviewTarget.expenseId ? { ...item, status: reviewAction } : item));
+      const request: UpdateExpenseStatusDto = {
+        status: reviewAction,
+        comments: reviewComment.trim() || null,
+        rowVersion: reviewTarget.rowVersion,
+      };
+      await api.put(`/Expenses/${reviewTarget.expenseId}/status`, request);
+      updateExpenses((current) => current.map((item) => item.expenseId === reviewTarget.expenseId ? { ...item, status: reviewAction } : item));
       setReviewTarget(null);
       setReviewComment('');
     } catch (error) {
@@ -233,9 +264,16 @@ export const AppWorkspace = () => {
     setBusy(true);
     setFormError('');
     try {
-      await api.put('/Budgets', { departmentId: Number(allocation.departmentId), fiscalYear: year, fiscalQuarter: quarter, allocatedAmount: Number(allocation.amount) });
-      const data = await getAllPages<Budget>('/Budgets', { fiscalYear: year, fiscalQuarter: quarter });
-      setBudgets(data);
+      const existingBudget = budgets.find((item) => item.departmentId === Number(allocation.departmentId));
+      const request: UpdateBudgetRequest = {
+        departmentId: Number(allocation.departmentId),
+        fiscalYear: year,
+        fiscalQuarter: quarter,
+        allocatedAmount: Number(allocation.amount),
+        ...(existingBudget ? { rowVersion: existingBudget.rowVersion } : {}),
+      };
+      await api.put('/Budgets', request);
+      await queryClient.invalidateQueries({ queryKey: ['budgets', user?.userId, year, quarter] });
       setShowBudgetForm(false);
       setAllocation({ departmentId: '', amount: '' });
     } catch (error) {
@@ -252,11 +290,10 @@ export const AppWorkspace = () => {
     try {
       if (editingDepartment) {
         await api.put(`/Departments/${editingDepartment.departmentId}`, payload);
-        setDepartments((current) => current.map((item) => item.departmentId === editingDepartment.departmentId ? { ...item, ...payload } : item));
       } else {
-        const { data } = await api.post<Department>('/Departments', payload);
-        setDepartments((current) => [...current, data].sort((first, second) => first.name.localeCompare(second.name)));
+        await api.post<Department>('/Departments', payload);
       }
+      await queryClient.invalidateQueries({ queryKey: coreKey });
       setShowDepartmentForm(false);
       setEditingDepartment(null);
       setDepartmentForm({ name: '', code: '' });
@@ -272,12 +309,68 @@ export const AppWorkspace = () => {
     setPageError('');
     try {
       await api.put(`/Users/${managedUser.userId}/role`, { roleId });
-      const roleName = roles.find((item) => item.roleId === roleId)?.name ?? managedUser.roleName;
-      setManagedUsers((current) => current.map((item) => item.userId === managedUser.userId ? { ...item, roleId, roleName } : item));
+      await queryClient.invalidateQueries({ queryKey: ['managed-users', user?.userId] });
       setRoleChanges((current) => { const next = { ...current }; delete next[managedUser.userId]; return next; });
     } catch (error) {
       console.error('Failed to update user role', error);
       setPageError('The role change was rejected. Your own role and the last Admin account are protected.');
+    } finally { setBusy(false); }
+  };
+
+  const saveManagedUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setPageError('');
+    try {
+      await api.post('/Users', {
+        firstName: managedUserForm.firstName.trim(),
+        lastName: managedUserForm.lastName.trim(),
+        email: managedUserForm.email.trim(),
+        roleId: Number(managedUserForm.roleId),
+        departmentId: managedUserForm.departmentId ? Number(managedUserForm.departmentId) : null,
+      });
+      await queryClient.invalidateQueries({ queryKey: ['managed-users', user?.userId] });
+      setShowUserForm(false);
+      setManagedUserForm({ firstName: '', lastName: '', email: '', roleId: '', departmentId: '' });
+    } catch (error) {
+      console.error('Failed to provision user', error);
+      setPageError('The user account could not be created. Check the email, role, and department.');
+    } finally { setBusy(false); }
+  };
+
+  const saveUserDepartment = async (managedUser: ManagedUser) => {
+    const departmentValue = departmentChanges[managedUser.userId] ?? managedUser.departmentId?.toString() ?? '';
+    setBusy(true);
+    setPageError('');
+    try {
+      await api.put(`/Users/${managedUser.userId}/department`, {
+        departmentId: departmentValue ? Number(departmentValue) : null,
+      });
+      await queryClient.invalidateQueries({ queryKey: ['managed-users', user?.userId] });
+      setDepartmentChanges((current) => {
+        const next = { ...current };
+        delete next[managedUser.userId];
+        return next;
+      });
+    } catch (error) {
+      console.error('Failed to update user department', error);
+      setPageError('The department assignment could not be saved.');
+    } finally { setBusy(false); }
+  };
+
+  const saveEntraIdentity = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!identityTarget) return;
+    setBusy(true);
+    setPageError('');
+    try {
+      await api.put(`/Users/${identityTarget.userId}/entra-identity`, entraIdentityForm);
+      await queryClient.invalidateQueries({ queryKey: ['managed-users', user?.userId] });
+      setIdentityTarget(null);
+      setEntraIdentityForm({ tenantId: '', objectId: '' });
+    } catch (error) {
+      console.error('Failed to link Entra identity', error);
+      setPageError('The Entra identity could not be linked. Verify the tenant and object IDs are GUIDs and are not assigned elsewhere.');
     } finally { setBusy(false); }
   };
 
@@ -293,8 +386,8 @@ export const AppWorkspace = () => {
     URL.revokeObjectURL(url);
   };
 
-  if (!['dashboard', 'overview', 'claims', 'budgets', 'audit-logs', 'departments', 'users', 'user-roles'].includes(normalizedPage)) return <Navigate to="/app/dashboard" replace />;
-  if ((isBudgets && !canReview) || ((isAudit || isDepartments || isUsers) && !isAdmin)) return <Navigate to="/app/dashboard" replace />;
+  if (!['dashboard', 'overview', 'claims', 'budgets', 'audit-logs', 'departments', 'users', 'user-roles'].includes(normalizedPage)) return <Navigate to={`${routeBase}/dashboard`} replace />;
+  if ((isBudgets && !canSeeBudgets) || (isAudit && !canSeeAudit) || ((isDepartments || isUsers) && !isAdmin)) return <Navigate to={`${routeBase}/dashboard`} replace />;
 
   const pageTitle = isClaims ? (role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims') : isBudgets ? 'Budget allocations' : isAudit ? 'Audit logs' : isDepartments ? 'Departments' : isUsers ? 'User roles' : 'Overview';
   const pageDescription = isClaims ? 'Track, submit and review expense claims.' : isBudgets ? 'Quarterly department allocations and spend.' : isAudit ? 'Immutable record of claim decisions.' : isDepartments ? 'Manage the departments used across claims and budgets.' : isUsers ? 'Assign workspace roles to registered accounts.' : 'A clear view of company spend and approvals.';
@@ -303,7 +396,7 @@ export const AppWorkspace = () => {
     <div className="app-shell">
       <aside className="app-sidebar">
         <Link className="app-brand" to={`${routeBase}/dashboard`} aria-label="HimLedger overview"><span className="app-brand-mark">H</span><span>HimLedger</span></Link>
-        <div className="app-workspace-tag"><span className="app-online-dot" /> Finance workspace</div>
+        <div className="app-workspace-tag"><span className="app-online-dot" /> {role} workspace</div>
         <nav className="app-nav" aria-label="Workspace navigation">
           <span className="app-nav-label">WORKSPACE</span>
           {navItems.map(({ to, label, icon: Icon }) => <Link key={to} to={to} onClick={() => document.querySelector('.app-sidebar')?.classList.remove('is-open')} className={`app-nav-link ${normalizedPage === to.split('/').pop() || (normalizedPage === 'users' && to.endsWith('/user-roles')) ? 'is-active' : ''}`}><Icon size={17} /><span>{label}</span></Link>)}
@@ -325,10 +418,11 @@ export const AppWorkspace = () => {
         <main className="app-content">
           <div className="app-page-heading"><div><div className="app-breadcrumb">HimLedger <span>/</span> Workspace <span>/</span> <strong>{pageTitle}</strong></div><h1>{pageTitle}</h1><p>{pageDescription}</p></div>
             {isDepartments && <button type="button" className="app-primary-button" onClick={() => { setEditingDepartment(null); setDepartmentForm({ name: '', code: '' }); setFormError(''); setShowDepartmentForm(true); }}><Plus size={17} /> Add department</button>}
-            {(!isBudgets && !isAudit && !isDepartments && !isUsers) && <button type="button" className="app-primary-button" onClick={() => { setFormError(''); setShowClaimForm(true); }}><Plus size={17} /> Submit claim</button>}
+            {canSubmitClaim && !isBudgets && !isAudit && !isDepartments && !isUsers && <button type="button" className="app-primary-button" onClick={() => { claimForm.reset(); setFormError(''); setShowClaimForm(true); }}><Plus size={17} /> Submit claim</button>}
             {isBudgets && isAdmin && <button type="button" className="app-primary-button" onClick={() => { setFormError(''); setShowBudgetForm(true); }}><Plus size={17} /> Adjust allocation</button>}
+            {isUsers && isAdmin && <button type="button" className="app-primary-button" onClick={() => { setManagedUserForm({ firstName: '', lastName: '', email: '', roleId: roles.find((item) => item.name === 'Employee')?.roleId.toString() ?? '', departmentId: '' }); setShowUserForm(true); }}><Plus size={17} /> Add user</button>}
           </div>
-          {pageError && <div className="app-error" role="alert">{pageError}<button type="button" onClick={() => setPageError('')} aria-label="Dismiss error"><X size={15} /></button></div>}
+          {(pageError || queryErrorMessage) && <div className="app-error" role="alert">{pageError || queryErrorMessage}{pageError && <button type="button" onClick={() => setPageError('')} aria-label="Dismiss error"><X size={15} /></button>}</div>}
 
           {normalizedPage === 'dashboard' && <>
             <section className="app-kpis" aria-label="Financial overview">
@@ -359,17 +453,21 @@ export const AppWorkspace = () => {
           {isAudit && <section className="app-panel app-audit-panel"><div className="app-audit-heading"><div><span className="app-section-kicker">READ-ONLY LEDGER</span><p>All timestamps are shown in UTC.</p></div><div className="app-export-actions"><button type="button" className="app-secondary-button" onClick={downloadAuditCsv}><ArrowDownToLine size={15} /> Export CSV</button><button type="button" className="app-secondary-button" onClick={() => window.print()}><FileText size={15} /> Print / PDF</button></div></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>Timestamp (UTC)</th><th>Claim ID</th><th>Action</th><th>Reviewed by</th><th>Manager comments</th></tr></thead><tbody>{auditRecords.map((record) => <tr key={record.approvalLogId}><td>{new Date(record.timestampUtc).toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' })}</td><td><strong>HL-{String(record.expenseId).padStart(5, '0')}</strong><small className="app-table-subtitle">{record.expenseTitle}</small></td><td><span className={`app-status app-status--${record.action.toLowerCase()}`}>{record.action}</span></td><td>{record.reviewedBy}</td><td>{record.comments || <span className="app-muted">No comment recorded</span>}</td></tr>)}{auditRecords.length === 0 && <tr><td colSpan={5} className="app-table-message">No review actions have been recorded.</td></tr>}</tbody></table></div></section>}
           {isDepartments && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ORGANIZATION</span><p>Departments are referenced by existing claims and budgets. Records cannot be deleted.</p></div><span className="app-results-count">{departments.length} departments</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>Department</th><th>Code</th><th>Actions</th></tr></thead><tbody>{departments.map((department) => <tr key={department.departmentId}><td><strong className="app-expense-title">{department.name}</strong></td><td><span className="app-department-code">{department.code}</span></td><td><button type="button" className="app-secondary-button app-edit-button" onClick={() => { setEditingDepartment(department); setDepartmentForm({ name: department.name, code: department.code }); setFormError(''); setShowDepartmentForm(true); }}>Edit department</button></td></tr>)}{departments.length === 0 && <tr><td colSpan={3} className="app-table-message">No departments configured.</td></tr>}</tbody></table></div></section>}
 
-          {isUsers && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ACCESS CONTROL</span><p>Role changes take effect on the user’s next authenticated request.</p></div><span className="app-results-count">{managedUsers.length} accounts</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>User</th><th>Department</th><th>Current role</th><th>Assign role</th><th>Action</th></tr></thead><tbody>{managedUsers.map((managedUser) => { const selectedRole = roleChanges[managedUser.userId] ?? managedUser.roleId; return <tr key={managedUser.userId}><td><strong className="app-expense-title">{managedUser.firstName} {managedUser.lastName}</strong><small className="app-table-subtitle">{managedUser.email}</small></td><td>{managedUser.departmentName ?? 'Unassigned'}</td><td>{managedUser.roleName}</td><td><select className="app-role-select" aria-label={`Role for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedRole} onChange={(event) => setRoleChanges((current) => ({ ...current, [managedUser.userId]: Number(event.target.value) }))}>{roles.map((item) => <option key={item.roleId} value={item.roleId}>{item.name}</option>)}</select></td><td><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedRole === managedUser.roleId || managedUser.userId === user?.userId} onClick={() => void saveUserRole(managedUser)}>{managedUser.userId === user?.userId ? 'Current account' : 'Save role'}</button></td></tr>})}{managedUsers.length === 0 && <tr><td colSpan={5} className="app-table-message">No user accounts found.</td></tr>}</tbody></table></div></section>}
+          {isUsers && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ACCESS CONTROL</span><p>Role, department, and Entra assignments take effect on the next authenticated request.</p></div><span className="app-results-count">{managedUsers.length} accounts</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>User</th><th>Department</th><th>Current role</th><th>Assign role</th><th>Entra identity</th><th>Actions</th></tr></thead><tbody>{managedUsers.map((managedUser) => { const selectedRole = roleChanges[managedUser.userId] ?? managedUser.roleId; const selectedDepartment = departmentChanges[managedUser.userId] ?? managedUser.departmentId?.toString() ?? ''; return <tr key={managedUser.userId}><td><strong className="app-expense-title">{managedUser.firstName} {managedUser.lastName}</strong><small className="app-table-subtitle">{managedUser.email}</small></td><td><select className="app-role-select" aria-label={`Department for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedDepartment} onChange={(event) => setDepartmentChanges((current) => ({ ...current, [managedUser.userId]: event.target.value }))}><option value="">Unassigned</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></td><td>{managedUser.roleName}</td><td><select className="app-role-select" aria-label={`Role for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedRole} onChange={(event) => setRoleChanges((current) => ({ ...current, [managedUser.userId]: Number(event.target.value) }))}>{roles.map((item) => <option key={item.roleId} value={item.roleId}>{item.name}</option>)}</select></td><td>{managedUser.entraObjectId ? 'Linked' : 'Not linked'}</td><td><div className="app-row-actions"><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedRole === managedUser.roleId || managedUser.userId === user?.userId} onClick={() => void saveUserRole(managedUser)}>{managedUser.userId === user?.userId ? 'Current account' : 'Save role'}</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedDepartment === (managedUser.departmentId?.toString() ?? '')} onClick={() => void saveUserDepartment(managedUser)}>Save department</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy} onClick={() => { setIdentityTarget(managedUser); setEntraIdentityForm({ tenantId: managedUser.entraTenantId ?? '', objectId: managedUser.entraObjectId ?? '' }); }}>Link Entra ID</button></div></td></tr>})}{managedUsers.length === 0 && <tr><td colSpan={6} className="app-table-message">No user accounts found.</td></tr>}</tbody></table></div></section>}
         </main>
       </div>
 
-      {showClaimForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowClaimForm(false); }}><section className="app-modal" role="dialog" aria-modal="true" aria-labelledby="new-claim-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM DETAILS</span><h2 id="new-claim-title">Submit an expense</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowClaimForm(false)}><X size={18} /></button></div><form className="app-form-grid" onSubmit={handleClaimSubmit}><label className="app-form-field app-form-field--full"><span>Expense title</span><input required maxLength={150} value={claim.title} onChange={(event) => setClaim({ ...claim, title: event.target.value })} placeholder="e.g. Client travel" /></label><label className="app-form-field"><span>Category</span><select required value={claim.categoryId} onChange={(event) => setClaim({ ...claim, categoryId: event.target.value })}><option value="">Select category</option>{categories.map((item) => <option key={item.categoryId} value={item.categoryId}>{item.name}</option>)}</select></label><label className="app-form-field"><span>Department</span><select required value={claim.departmentId} onChange={(event) => setClaim({ ...claim, departmentId: event.target.value })}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></label><label className="app-form-field"><span>Amount (ZAR)</span><input required type="number" min="0.01" step="0.01" value={claim.amount} onChange={(event) => setClaim({ ...claim, amount: event.target.value })} placeholder="0.00" /></label><label className="app-form-field"><span>Expense date</span><input required type="date" value={claim.expenseDate} onChange={(event) => setClaim({ ...claim, expenseDate: event.target.value })} /></label><label className="app-form-field app-form-field--full"><span>Notes</span><textarea maxLength={500} rows={3} value={claim.description} onChange={(event) => setClaim({ ...claim, description: event.target.value })} placeholder="Add business purpose or context" /></label><p className="app-form-note app-form-field--full">Receipt attachment is not enabled in this workspace yet.</p>{formError && <p role="alert" className="app-form-error app-form-field--full">{formError}</p>}<div className="app-modal-actions app-form-field--full"><button type="button" className="app-secondary-button" onClick={() => setShowClaimForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Submitting...' : 'Submit claim'}</button></div></form></section></div>}
+      {showClaimForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowClaimForm(false); }}><section className="app-modal" role="dialog" aria-modal="true" aria-labelledby="new-claim-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM DETAILS</span><h2 id="new-claim-title">Submit an expense</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowClaimForm(false)}><X size={18} /></button></div><form className="app-form-grid" onSubmit={claimForm.handleSubmit(handleClaimSubmit)}><label className="app-form-field app-form-field--full"><span>Expense title</span><input maxLength={200} {...claimForm.register('title')} placeholder="e.g. Client travel" />{claimForm.formState.errors.title && <small role="alert" className="app-form-error">{claimForm.formState.errors.title.message}</small>}</label><label className="app-form-field"><span>Category</span><select {...claimForm.register('categoryId')}><option value="">Select category</option>{categories.map((item) => <option key={item.categoryId} value={item.categoryId}>{item.name}</option>)}</select>{claimForm.formState.errors.categoryId && <small role="alert" className="app-form-error">{claimForm.formState.errors.categoryId.message}</small>}</label><label className="app-form-field"><span>Department</span><select {...claimForm.register('departmentId')}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select>{claimForm.formState.errors.departmentId && <small role="alert" className="app-form-error">{claimForm.formState.errors.departmentId.message}</small>}</label><label className="app-form-field"><span>Amount (ZAR)</span><input type="number" min="0.01" step="0.01" {...claimForm.register('amount')} placeholder="0.00" />{claimForm.formState.errors.amount && <small role="alert" className="app-form-error">{claimForm.formState.errors.amount.message}</small>}</label><label className="app-form-field"><span>Expense date</span><input type="date" {...claimForm.register('expenseDate')} />{claimForm.formState.errors.expenseDate && <small role="alert" className="app-form-error">{claimForm.formState.errors.expenseDate.message}</small>}</label><label className="app-form-field app-form-field--full"><span>Notes</span><textarea rows={3} {...claimForm.register('description')} placeholder="Add business purpose or context" />{claimForm.formState.errors.description && <small role="alert" className="app-form-error">{claimForm.formState.errors.description.message}</small>}</label><p className="app-form-note app-form-field--full">Receipt attachment is not enabled in this workspace yet.</p>{formError && <p role="alert" className="app-form-error app-form-field--full">{formError}</p>}<div className="app-modal-actions app-form-field--full"><button type="button" className="app-secondary-button" onClick={() => setShowClaimForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Submitting...' : 'Submit claim'}</button></div></form></section></div>}
 
       {reviewTarget && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewTarget(null); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM HL-{String(reviewTarget.expenseId).padStart(5, '0')}</span><h2 id="review-title">{reviewAction} claim</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setReviewTarget(null)}><X size={18} /></button></div><p className="app-review-summary"><strong>{reviewTarget.title}</strong><span>{reviewTarget.userFullName} · {money(reviewTarget.amount)}</span></p><form onSubmit={submitReview} className="app-review-form"><label className="app-form-field"><span>Comment</span><textarea maxLength={500} rows={4} value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} placeholder="Add context for this decision" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setReviewTarget(null)}>Cancel</button><button type="submit" className={`app-primary-button ${reviewAction === 'Rejected' ? 'is-danger' : ''}`} disabled={busy}>{busy ? 'Saving...' : `Confirm ${reviewAction.toLowerCase()}`}</button></div></form></section></div>}
 
       {showBudgetForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowBudgetForm(false); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="allocation-title"><div className="app-modal-heading"><div><span className="app-section-kicker">FY {year} · Q{quarter}</span><h2 id="allocation-title">Adjust allocation</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowBudgetForm(false)}><X size={18} /></button></div><form className="app-review-form" onSubmit={saveAllocation}><label className="app-form-field"><span>Department</span><select required value={allocation.departmentId} onChange={(event) => setAllocation({ ...allocation, departmentId: event.target.value })}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></label><label className="app-form-field"><span>Allocated amount (ZAR)</span><input required type="number" min="0" step="0.01" value={allocation.amount} onChange={(event) => setAllocation({ ...allocation, amount: event.target.value })} placeholder="0.00" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setShowBudgetForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Saving...' : 'Save allocation'}</button></div></form></section></div>}
 
       {showDepartmentForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowDepartmentForm(false); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="app-modal-heading"><div><span className="app-section-kicker">ORGANIZATION</span><h2 id="department-title">{editingDepartment ? 'Edit department' : 'Add department'}</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowDepartmentForm(false)}><X size={18} /></button></div><form className="app-review-form" onSubmit={saveDepartment}><label className="app-form-field"><span>Department name</span><input required maxLength={100} value={departmentForm.name} onChange={(event) => setDepartmentForm({ ...departmentForm, name: event.target.value })} /></label><label className="app-form-field"><span>Department code</span><input required maxLength={10} value={departmentForm.code} onChange={(event) => setDepartmentForm({ ...departmentForm, code: event.target.value.toUpperCase() })} /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setShowDepartmentForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Saving...' : editingDepartment ? 'Save changes' : 'Create department'}</button></div></form></section></div>}
+
+      {showUserForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowUserForm(false); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="managed-user-title"><div className="app-modal-heading"><div><span className="app-section-kicker">USER PROVISIONING</span><h2 id="managed-user-title">Add user account</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowUserForm(false)}><X size={18} /></button></div><form className="app-review-form" onSubmit={saveManagedUser}><label className="app-form-field"><span>First name</span><input required maxLength={50} value={managedUserForm.firstName} onChange={(event) => setManagedUserForm({ ...managedUserForm, firstName: event.target.value })} /></label><label className="app-form-field"><span>Last name</span><input required maxLength={50} value={managedUserForm.lastName} onChange={(event) => setManagedUserForm({ ...managedUserForm, lastName: event.target.value })} /></label><label className="app-form-field"><span>Work email</span><input required type="email" maxLength={100} value={managedUserForm.email} onChange={(event) => setManagedUserForm({ ...managedUserForm, email: event.target.value })} /></label><label className="app-form-field"><span>Role</span><select required value={managedUserForm.roleId} onChange={(event) => setManagedUserForm({ ...managedUserForm, roleId: event.target.value })}><option value="">Select role</option>{roles.map((item) => <option key={item.roleId} value={item.roleId}>{item.name}</option>)}</select></label><label className="app-form-field"><span>Department</span><select value={managedUserForm.departmentId} onChange={(event) => setManagedUserForm({ ...managedUserForm, departmentId: event.target.value })}><option value="">Unassigned</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></label><p className="app-form-note">Employee and Manager accounts need a department. Link the Entra ID after creating the account.</p>{pageError && <p role="alert" className="app-form-error">{pageError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setShowUserForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Creating...' : 'Create account'}</button></div></form></section></div>}
+
+      {identityTarget && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setIdentityTarget(null); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="entra-identity-title"><div className="app-modal-heading"><div><span className="app-section-kicker">{identityTarget.email}</span><h2 id="entra-identity-title">Link Entra identity</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setIdentityTarget(null)}><X size={18} /></button></div><form className="app-review-form" onSubmit={saveEntraIdentity}><label className="app-form-field"><span>Tenant ID</span><input required minLength={36} maxLength={36} value={entraIdentityForm.tenantId} onChange={(event) => setEntraIdentityForm({ ...entraIdentityForm, tenantId: event.target.value })} placeholder="00000000-0000-0000-0000-000000000000" /></label><label className="app-form-field"><span>Entra object ID</span><input required minLength={36} maxLength={36} value={entraIdentityForm.objectId} onChange={(event) => setEntraIdentityForm({ ...entraIdentityForm, objectId: event.target.value })} placeholder="00000000-0000-0000-0000-000000000000" /></label>{pageError && <p role="alert" className="app-form-error">{pageError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setIdentityTarget(null)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Linking...' : 'Save identity'}</button></div></form></section></div>}
     </div>
   );
 };

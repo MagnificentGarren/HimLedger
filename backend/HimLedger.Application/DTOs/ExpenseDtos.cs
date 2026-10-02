@@ -10,10 +10,10 @@ public sealed record CreateExpenseDto
     [Range(1, int.MaxValue)]
     public int DepartmentId { get; init; }
 
-    [Required, MaxLength(200)]
+    [Required, MaxLength(150)]
     public required string Title { get; init; }
 
-    [MaxLength(2000)]
+    [MaxLength(500)]
     public string? Description { get; init; }
 
     [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true)]
@@ -21,7 +21,7 @@ public sealed record CreateExpenseDto
 
     public DateTime ExpenseDate { get; init; }
 
-    [MaxLength(2048)]
+    [MaxLength(2083)]
     public string? ReceiptUrl { get; init; }
 }
 
@@ -39,7 +39,8 @@ public sealed record ExpenseResponseDto(
     DateTime ExpenseDate,
     string? ReceiptUrl,
     string Status,
-    DateTime CreatedAt
+    DateTime CreatedAt,
+    string RowVersion
 );
 
 public sealed record UpdateExpenseStatusDto
@@ -47,6 +48,9 @@ public sealed record UpdateExpenseStatusDto
     [Required, MaxLength(20)]
     public required string Status { get; init; }
 
-    [MaxLength(2000)]
+    [MaxLength(500)]
     public string? Comments { get; init; }
+
+    [Required, MaxLength(24)]
+    public required string RowVersion { get; init; }
 }

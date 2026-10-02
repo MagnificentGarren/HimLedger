@@ -31,7 +31,7 @@ CREATE TABLE Roles (
 );
 
 -- Seed Default Roles
-INSERT INTO Roles (Name) VALUES ('Admin'), ('Manager'), ('Employee');
+INSERT INTO Roles (Name) VALUES ('Admin'), ('Manager'), ('Employee'), ('Finance');
 
 -- 4. Users Table
 CREATE TABLE Users (
@@ -40,12 +40,17 @@ CREATE TABLE Users (
     LastName NVARCHAR(50) NOT NULL,
     Email NVARCHAR(100) NOT NULL UNIQUE,
     PasswordHash NVARCHAR(255) NOT NULL,
+    EntraTenantId NVARCHAR(36) NULL,
+    EntraObjectId NVARCHAR(36) NULL,
     RoleId INT NOT NULL,
     DepartmentId INT NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (RoleId) REFERENCES Roles(RoleId),
     FOREIGN KEY (DepartmentId) REFERENCES Departments(DepartmentId)
 );
+CREATE UNIQUE INDEX UX_Users_EntraTenantId_EntraObjectId
+    ON Users (EntraTenantId, EntraObjectId)
+    WHERE EntraTenantId IS NOT NULL AND EntraObjectId IS NOT NULL;
 
 -- 5. Categories Table
 CREATE TABLE Categories (
@@ -69,6 +74,7 @@ CREATE TABLE Budgets (
     FiscalQuarter INT NOT NULL CHECK (FiscalQuarter BETWEEN 1 AND 4),
     AllocatedAmount DECIMAL(18,2) NOT NULL CHECK (AllocatedAmount >= 0),
     RemainingAmount DECIMAL(18,2) NOT NULL,
+    RowVersion ROWVERSION NOT NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (DepartmentId) REFERENCES Departments(DepartmentId),
     CONSTRAINT UQ_Department_Quarter UNIQUE (DepartmentId, FiscalYear, FiscalQuarter)
@@ -86,6 +92,7 @@ CREATE TABLE Expenses (
     ExpenseDate DATE NOT NULL,
     ReceiptUrl NVARCHAR(2083) NULL,
     Status NVARCHAR(20) NOT NULL DEFAULT 'Pending' CHECK (Status IN ('Pending', 'Approved', 'Rejected')),
+    RowVersion ROWVERSION NOT NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (UserId) REFERENCES Users(UserId),
     FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId),

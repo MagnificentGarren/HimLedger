@@ -1,5 +1,30 @@
 # React + TypeScript + Vite
 
+## HimLedger identity and workspaces
+
+The API accepts Entra ID v2 access tokens when `EntraId__Authority` and
+`EntraId__Audience` are configured. Set the authority to the organization's
+tenant authority (for example, `https://login.microsoftonline.com/<tenant-id>/v2.0`)
+and the audience to the API registration's audience. The API maps the validated
+token's `tid` and `oid` to an internal user; an administrator must provision the
+internal user, department, role, and Entra identity before that person can use
+the API. Manage mappings with the admin-only `PUT /api/Users/{id}/entra-identity`
+and department assignments with `PUT /api/Users/{id}/department`.
+
+For the browser app, configure `VITE_ENTRA_CLIENT_ID`, `VITE_ENTRA_AUTHORITY`,
+and `VITE_ENTRA_API_SCOPE` (the exposed API scope, such as
+`api://<api-client-id>/access_as_user`). No client secret belongs in the
+frontend. Local password login is only enabled in development unless
+`VITE_ENABLE_LOCAL_LOGIN=true` is explicitly set.
+
+Authenticated users are routed to `/employee/*`, `/manager/*`, `/finance/*`,
+or `/admin/*` based on their server-returned role. These routes are only a
+presentation boundary; the API independently enforces every role and resource
+scope.
+
+To regenerate TypeScript API models from the running API's OpenAPI document,
+start the API on `http://localhost:5228` and run `npm run api:types`.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

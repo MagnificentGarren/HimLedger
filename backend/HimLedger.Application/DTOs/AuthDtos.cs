@@ -4,7 +4,7 @@ namespace HimLedger.Application.DTOs;
 
 public sealed record LoginDto
 {
-    [Required, EmailAddress, MaxLength(256)]
+    [Required, EmailAddress, MaxLength(100)]
     public required string Email { get; init; }
 
     [Required]
@@ -22,13 +22,13 @@ public sealed record AuthResponseDto(
 
 public sealed record RegisterUserDto
 {
-    [Required, MaxLength(100)]
+    [Required, MaxLength(50)]
     public required string FirstName { get; init; }
 
-    [Required, MaxLength(100)]
+    [Required, MaxLength(50)]
     public required string LastName { get; init; }
 
-    [Required, EmailAddress, MaxLength(256)]
+    [Required, EmailAddress, MaxLength(100)]
     public required string Email { get; init; }
 
     [Required, MinLength(8), MaxLength(128)]

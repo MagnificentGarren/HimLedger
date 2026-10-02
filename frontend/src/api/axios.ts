@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { acquireEntraAccessToken } from '../auth/entra';
 
 const api = axios.create({
   baseURL: 'http://localhost:5228/api',
@@ -7,11 +8,17 @@ const api = axios.create({
   },
 });
 
-api.interceptors.request.use((config) => {
+api.interceptors.request.use(async (config) => {
+  if (config.headers.Authorization) return config;
+  if (localStorage.getItem('authMethod') === 'entra') {
+    const accessToken = await acquireEntraAccessToken();
+    config.headers.Authorization = `Bearer ${accessToken}`;
+    return config;
+  }
+
   const token = localStorage.getItem('token');
 
   if (token) {
-    config.headers = config.headers ?? {};
     config.headers.Authorization = `Bearer ${token}`;
   }
 

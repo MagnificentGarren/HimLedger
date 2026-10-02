@@ -7,6 +7,8 @@ public class User
     public string LastName { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
     public string PasswordHash { get; set; } = string.Empty;
+    public string? EntraTenantId { get; set; }
+    public string? EntraObjectId { get; set; }
     public int RoleId { get; set; }
     public int? DepartmentId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

@@ -35,10 +35,23 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         var periodEnd = periodStart.AddMonths(3);
         var budgetsQuery = context.Budgets
             .Where(budget => budget.FiscalYear == year && budget.FiscalQuarter == quarter);
-        if (User.IsInRole("Manager"))
+        if (User.IsInRole("Manager") || User.IsInRole("Employee"))
         {
-            _ = int.TryParse(User.FindFirst("DepartmentId")?.Value, out var departmentId);
-            budgetsQuery = budgetsQuery.Where(budget => budget.DepartmentId == departmentId);
+            if (!int.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out var userId))
+            {
+                return Unauthorized();
+            }
+            var departmentId = await context.Users
+                .Where(user => user.UserId == userId)
+                .Select(user => user.DepartmentId)
+                .SingleOrDefaultAsync(cancellationToken);
+            budgetsQuery = departmentId is int assignedDepartmentId
+                ? budgetsQuery.Where(budget => budget.DepartmentId == assignedDepartmentId)
+                : budgetsQuery.Where(_ => false);
+        }
+        else if (!User.IsInRole("Admin") && !User.IsInRole("Finance"))
+        {
+            return Forbid();
         }
 
         var budgets = await budgetsQuery
@@ -51,7 +64,8 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
                 DepartmentName = budget.Department.Name,
                 budget.FiscalYear,
                 budget.FiscalQuarter,
-                budget.AllocatedAmount
+                budget.AllocatedAmount,
+                RowVersion = Convert.ToBase64String(budget.RowVersion)
             })
             .ToPagedResponseAsync(page, pageSize, cancellationToken);
 
@@ -77,7 +91,8 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
                     budget.FiscalQuarter,
                     budget.AllocatedAmount,
                     spentAmount,
-                    budget.AllocatedAmount - spentAmount);
+                    budget.AllocatedAmount - spentAmount,
+                    budget.RowVersion);
             }).ToArray(),
             budgets.Page,
             budgets.PageSize,
@@ -117,6 +132,13 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
             cancellationToken);
         if (budget is null)
         {
+            if (!string.IsNullOrEmpty(request.RowVersion))
+            {
+                return Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Bad Request",
+                    detail: "A row version cannot be provided when creating a budget.");
+            }
             budget = new Budget
             {
                 DepartmentId = request.DepartmentId,
@@ -128,6 +150,14 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         }
         else
         {
+            if (!TryDecodeRowVersion(request.RowVersion, out var rowVersion))
+            {
+                return Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Bad Request",
+                    detail: "A valid budget row version is required.");
+            }
+            context.Entry(budget).Property(item => item.RowVersion).OriginalValue = rowVersion;
             budget.AllocatedAmount = request.AllocatedAmount;
         }
 
@@ -141,8 +171,29 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
             .SumAsync(expense => (decimal?)expense.Amount, cancellationToken) ?? 0;
         budget.RemainingAmount = request.AllocatedAmount - spentAmount;
 
-        await context.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict("The budget changed after it was loaded. Refresh and try again.");
+        }
         return NoContent();
+    }
+
+    private static bool TryDecodeRowVersion(string? value, out byte[] rowVersion)
+    {
+        try
+        {
+            rowVersion = string.IsNullOrWhiteSpace(value) ? [] : Convert.FromBase64String(value);
+            return rowVersion.Length == 8;
+        }
+        catch (FormatException)
+        {
+            rowVersion = [];
+            return false;
+        }
     }
 
     public sealed record BudgetListItem(
@@ -153,7 +204,8 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         int FiscalQuarter,
         decimal AllocatedAmount,
         decimal SpentAmount,
-        decimal RemainingAmount);
+        decimal RemainingAmount,
+        string RowVersion);
 
     public sealed record UpdateBudgetRequest
     {
@@ -168,5 +220,8 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
 
         [Range(typeof(decimal), "0", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true)]
         public decimal AllocatedAmount { get; init; }
+
+        [MaxLength(24)]
+        public string? RowVersion { get; init; }
     }
 }
