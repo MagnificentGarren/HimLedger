@@ -1,19 +1,17 @@
 using HimLedger.Domain.Entities;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
 namespace HimLedger.Infrastructure;
 
 public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : DbContext(options)
 {
-    private static readonly PasswordHasher<User> PasswordHasher = new();
     private static readonly User SeedAdminUser = new()
     {
         UserId = 1,
         FirstName = "System",
         LastName = "Admin",
         Email = "admin@himledger.com",
-        PasswordHash = PasswordHasher.HashPassword(new User(), "Password123"),
+        PasswordHash = string.Empty,
         RoleId = 1,
         DepartmentId = null,
         CreatedAt = new DateTime(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc)
