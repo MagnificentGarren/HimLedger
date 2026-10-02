@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 
 namespace HimLedger.Application.DTOs;
 
+/// <summary>Payload for creating an expense claim draft.</summary>
 public sealed record CreateExpenseDto
 {
     [Range(1, int.MaxValue)]
@@ -21,10 +22,9 @@ public sealed record CreateExpenseDto
 
     public DateTime ExpenseDate { get; init; }
 
-    [MaxLength(2083)]
-    public string? ReceiptUrl { get; init; }
 }
 
+/// <summary>Claim details returned to an API client.</summary>
 public sealed record ExpenseResponseDto(
     int ExpenseId,
     int UserId,
@@ -43,6 +43,7 @@ public sealed record ExpenseResponseDto(
     string RowVersion
 );
 
+/// <summary>Reviewer decision and optimistic concurrency token for a claim.</summary>
 public sealed record UpdateExpenseStatusDto
 {
     [Required, MaxLength(20)]
@@ -53,4 +54,11 @@ public sealed record UpdateExpenseStatusDto
 
     [Required, MaxLength(24)]
     public required string RowVersion { get; init; }
+}
+
+/// <summary>Notes recorded with a claim lifecycle transition.</summary>
+public sealed record ClaimTransitionRequest
+{
+    [MaxLength(1000)]
+    public string? Notes { get; init; }
 }

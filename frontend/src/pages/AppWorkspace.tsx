@@ -37,7 +37,9 @@ interface Budget {
   fiscalYear: number;
   fiscalQuarter: number;
   allocatedAmount: number;
-  spentAmount: number;
+  committedAmount: number;
+  approvedAmount: number;
+  reimbursedAmount: number;
   remainingAmount: number;
   rowVersion: string;
 }
@@ -59,7 +61,7 @@ const emptyExpenses: Expense[] = [];
 const emptyCategories: Category[] = [];
 const emptyDepartments: Department[] = [];
 const claimSchema = z.object({
-  title: z.string().trim().min(1, 'Enter an expense title.').max(200),
+  title: z.string().trim().min(1, 'Enter an expense title.').max(150),
   categoryId: z.string().min(1, 'Select a category.'),
   departmentId: z.string().min(1, 'Select a department.'),
   amount: z.string().regex(/^(?:\d+)(?:\.\d{1,2})?$/, 'Enter an amount with up to two decimal places.')
@@ -84,6 +86,7 @@ export const AppWorkspace = () => {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All statuses');
   const [departmentFilter, setDepartmentFilter] = useState('All departments');
+  const [categoryFilter, setCategoryFilter] = useState('All categories');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [year, setYear] = useState(currentYear);
@@ -95,8 +98,9 @@ export const AppWorkspace = () => {
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
   const [identityTarget, setIdentityTarget] = useState<ManagedUser | null>(null);
   const [reviewTarget, setReviewTarget] = useState<Expense | null>(null);
-  const [reviewAction, setReviewAction] = useState<'Approved' | 'Rejected'>('Approved');
+  const [reviewAction, setReviewAction] = useState<'Approved' | 'Rejected' | 'Changes Requested'>('Approved');
   const [reviewComment, setReviewComment] = useState('');
+  const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
   const claimForm = useForm<ClaimFormValues>({
@@ -193,13 +197,14 @@ export const AppWorkspace = () => {
     const matchesQuery = `${expense.title} ${expense.userFullName} ${expense.categoryName} ${expense.departmentName} ${expense.expenseId}`.toLowerCase().includes(query.toLowerCase());
     const matchesStatus = statusFilter === 'All statuses' || expense.status === statusFilter;
     const matchesDepartment = departmentFilter === 'All departments' || String(expense.departmentId) === departmentFilter;
+    const matchesCategory = categoryFilter === 'All categories' || String(expense.categoryId) === categoryFilter;
     const expenseDate = expense.expenseDate.slice(0, 10);
-    return matchesQuery && matchesStatus && matchesDepartment && (!fromDate || expenseDate >= fromDate) && (!toDate || expenseDate <= toDate);
-  }), [departmentFilter, expenses, fromDate, query, statusFilter, toDate]);
+    return matchesQuery && matchesStatus && matchesDepartment && matchesCategory && (!fromDate || expenseDate >= fromDate) && (!toDate || expenseDate <= toDate);
+  }), [categoryFilter, departmentFilter, expenses, fromDate, query, statusFilter, toDate]);
 
   const totalExpenses = expenses.reduce((sum, item) => sum + item.amount, 0);
-  const pendingCount = expenses.filter((item) => item.status === 'Pending').length;
-  const yearApproved = expenses.filter((item) => item.status === 'Approved' && new Date(item.expenseDate).getFullYear() === currentYear).reduce((sum, item) => sum + item.amount, 0);
+  const pendingCount = expenses.filter((item) => item.status === 'Pending Approval').length;
+  const yearApproved = expenses.filter((item) => (item.status === 'Approved' || item.status === 'Reimbursed') && new Date(item.expenseDate).getFullYear() === currentYear).reduce((sum, item) => sum + item.amount, 0);
   const allocatedTotal = budgets.reduce((sum, budget) => sum + budget.allocatedAmount, 0);
   const remainingTotal = budgets.reduce((sum, budget) => sum + budget.remainingAmount, 0);
   const utilization = allocatedTotal > 0 ? Math.max(0, Math.min(((allocatedTotal - remainingTotal) / allocatedTotal) * 100, 100)) : 0;
@@ -226,15 +231,38 @@ export const AppWorkspace = () => {
         amount: Number(values.amount),
         expenseDate: `${values.expenseDate}T00:00:00`,
         description: values.description || null,
-        receiptUrl: null,
       } satisfies CreateExpenseDto;
       const { data } = await api.post<Expense>('/Expenses', request);
-      updateExpenses((current) => [data, ...current]);
+      updateExpenses((current) => [data, ...current.filter((item) => item.expenseId !== data.expenseId)]);
+      if (receiptFile) {
+        const form = new FormData();
+        form.append('file', receiptFile);
+        await api.post(`/Expenses/${data.expenseId}/attachments`, form);
+      }
+      await api.post(`/Expenses/${data.expenseId}/submit`, { notes: null });
+      const { data: submitted } = await api.get<Expense>(`/Expenses/${data.expenseId}`);
+      updateExpenses((current) => current.map((item) => item.expenseId === data.expenseId ? submitted : item));
       setShowClaimForm(false);
+      setReceiptFile(null);
       claimForm.reset();
     } catch (error) {
       console.error('Failed to submit claim', error);
-      setFormError('The claim could not be submitted. Check the details and try again.');
+      await queryClient.invalidateQueries({ queryKey: coreKey });
+      setFormError('The claim could not be fully submitted. Any saved draft remains available to submit again.');
+    } finally { setBusy(false); }
+  };
+
+  const submitExistingClaim = async (expense: Expense) => {
+    setBusy(true);
+    setPageError('');
+    try {
+      const action = expense.status === 'Changes Requested' ? 'resubmit' : 'submit';
+      await api.post(`/Expenses/${expense.expenseId}/${action}`, { notes: null });
+      const { data } = await api.get<Expense>(`/Expenses/${expense.expenseId}`);
+      updateExpenses((current) => current.map((item) => item.expenseId === data.expenseId ? data : item));
+    } catch (error) {
+      console.error('Failed to submit claim draft', error);
+      setPageError('The claim could not be submitted. Refresh and try again.');
     } finally { setBusy(false); }
   };
 
@@ -250,7 +278,7 @@ export const AppWorkspace = () => {
         rowVersion: reviewTarget.rowVersion,
       };
       await api.put(`/Expenses/${reviewTarget.expenseId}/status`, request);
-      updateExpenses((current) => current.map((item) => item.expenseId === reviewTarget.expenseId ? { ...item, status: reviewAction } : item));
+      await queryClient.invalidateQueries({ queryKey: coreKey });
       setReviewTarget(null);
       setReviewComment('');
     } catch (error) {
@@ -386,6 +414,27 @@ export const AppWorkspace = () => {
     URL.revokeObjectURL(url);
   };
 
+  const downloadReconciliationCsv = async () => {
+    setPageError('');
+    try {
+      const params = new URLSearchParams();
+      if (fromDate) params.set('fromDate', fromDate);
+      if (toDate) params.set('toDate', toDate);
+      if (departmentFilter !== 'All departments') params.set('departmentId', departmentFilter);
+      if (categoryFilter !== 'All categories') params.set('categoryId', categoryFilter);
+      const { data } = await api.get<Blob>(`/Expenses/reconciliation.csv?${params.toString()}`, { responseType: 'blob' });
+      const url = URL.createObjectURL(data);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `himledger-reconciliation-${new Date().toISOString().slice(0, 10)}.csv`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export reconciliation CSV', error);
+      setPageError('The reconciliation export could not be downloaded.');
+    }
+  };
+
   if (!['dashboard', 'overview', 'claims', 'budgets', 'audit-logs', 'departments', 'users', 'user-roles'].includes(normalizedPage)) return <Navigate to={`${routeBase}/dashboard`} replace />;
   if ((isBudgets && !canSeeBudgets) || (isAudit && !canSeeAudit) || ((isDepartments || isUsers) && !isAdmin)) return <Navigate to={`${routeBase}/dashboard`} replace />;
 
@@ -418,7 +467,7 @@ export const AppWorkspace = () => {
         <main className="app-content">
           <div className="app-page-heading"><div><div className="app-breadcrumb">HimLedger <span>/</span> Workspace <span>/</span> <strong>{pageTitle}</strong></div><h1>{pageTitle}</h1><p>{pageDescription}</p></div>
             {isDepartments && <button type="button" className="app-primary-button" onClick={() => { setEditingDepartment(null); setDepartmentForm({ name: '', code: '' }); setFormError(''); setShowDepartmentForm(true); }}><Plus size={17} /> Add department</button>}
-            {canSubmitClaim && !isBudgets && !isAudit && !isDepartments && !isUsers && <button type="button" className="app-primary-button" onClick={() => { claimForm.reset(); setFormError(''); setShowClaimForm(true); }}><Plus size={17} /> Submit claim</button>}
+            {canSubmitClaim && !isBudgets && !isAudit && !isDepartments && !isUsers && <button type="button" className="app-primary-button" onClick={() => { claimForm.reset(); setReceiptFile(null); setFormError(''); setShowClaimForm(true); }}><Plus size={17} /> Submit claim</button>}
             {isBudgets && isAdmin && <button type="button" className="app-primary-button" onClick={() => { setFormError(''); setShowBudgetForm(true); }}><Plus size={17} /> Adjust allocation</button>}
             {isUsers && isAdmin && <button type="button" className="app-primary-button" onClick={() => { setManagedUserForm({ firstName: '', lastName: '', email: '', roleId: roles.find((item) => item.name === 'Employee')?.roleId.toString() ?? '', departmentId: '' }); setShowUserForm(true); }}><Plus size={17} /> Add user</button>}
           </div>
@@ -441,9 +490,9 @@ export const AppWorkspace = () => {
             </div>
           </>}
 
-          {isClaims && <section className="app-panel app-claims-panel"><div className="app-filter-row"><label className="app-filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option><option>Pending</option><option>Approved</option><option>Rejected</option></select></label><label className="app-filter-select"><span>Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option>All departments</option>{departments.map((department) => <option key={department.departmentId} value={department.departmentId}>{department.name}</option>)}</select></label><label className="app-filter-date"><span>From</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label className="app-filter-date"><span>To</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label><span className="app-results-count">{visibleExpenses.length} {visibleExpenses.length === 1 ? 'claim' : 'claims'}</span></div>
+          {isClaims && <section className="app-panel app-claims-panel"><div className="app-filter-row"><label className="app-filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{['Draft', 'Submitted', 'Pending Approval', 'Approved', 'Rejected', 'Changes Requested', 'Resubmitted', 'Reimbursed'].map((status) => <option key={status}>{status}</option>)}</select></label><label className="app-filter-select"><span>Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option>All departments</option>{departments.map((department) => <option key={department.departmentId} value={department.departmentId}>{department.name}</option>)}</select></label><label className="app-filter-select"><span>Category</span><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option>All categories</option>{categories.map((category) => <option key={category.categoryId} value={category.categoryId}>{category.name}</option>)}</select></label><label className="app-filter-date"><span>From</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label className="app-filter-date"><span>To</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label><span className="app-results-count">{visibleExpenses.length} {visibleExpenses.length === 1 ? 'claim' : 'claims'}</span>{canSeeAudit && <button type="button" className="app-secondary-button" onClick={() => void downloadReconciliationCsv()}><ArrowDownToLine size={15} /> Export reconciliation</button>}</div>
             <div className="app-table-scroll"><table className="app-table"><thead><tr><th>Claim ID</th><th>Employee</th><th>Expense</th><th>Category</th><th>Department</th><th>Date</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-              {loading ? <tr><td colSpan={9} className="app-table-message">Loading claims...</td></tr> : visibleExpenses.map((expense) => <tr key={expense.expenseId}><td className="app-id-cell">HL-{String(expense.expenseId).padStart(5, '0')}</td><td>{expense.userFullName}</td><td><span className="app-expense-title">{expense.title}</span>{expense.description && <small className="app-table-subtitle">{expense.description}</small>}</td><td>{expense.categoryName}</td><td>{expense.departmentName}</td><td>{dateLabel(expense.expenseDate)}</td><td className="app-money-cell">{money(expense.amount)}</td><td><span className={`app-status app-status--${expense.status.toLowerCase()}`}>{expense.status}</span></td><td><div className="app-row-actions">{expense.receiptUrl && <a className="app-icon-button" href={expense.receiptUrl} target="_blank" rel="noreferrer" title="View receipt"><FileText size={15} /></a>}{canReview && expense.status === 'Pending' && <><button type="button" className="app-icon-button app-approve" title="Approve" aria-label={`Approve ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Approved'); setFormError(''); }}><Check size={16} /></button><button type="button" className="app-icon-button app-reject" title="Reject" aria-label={`Reject ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Rejected'); setFormError(''); }}><X size={16} /></button></>}</div></td></tr>)}
+              {loading ? <tr><td colSpan={9} className="app-table-message">Loading claims...</td></tr> : visibleExpenses.map((expense) => <tr key={expense.expenseId}><td className="app-id-cell">HL-{String(expense.expenseId).padStart(5, '0')}</td><td>{expense.userFullName}</td><td><span className="app-expense-title">{expense.title}</span>{expense.description && <small className="app-table-subtitle">{expense.description}</small>}</td><td>{expense.categoryName}</td><td>{expense.departmentName}</td><td>{dateLabel(expense.expenseDate)}</td><td className="app-money-cell">{money(expense.amount)}</td><td><span className={`app-status app-status--${expense.status.toLowerCase().replace(/\s+/g, '-')}`}>{expense.status}</span></td><td><div className="app-row-actions">{expense.receiptUrl && <a className="app-icon-button" href={expense.receiptUrl} target="_blank" rel="noreferrer" title="View receipt"><FileText size={15} /></a>}{expense.userId === user?.userId && (expense.status === 'Draft' || expense.status === 'Changes Requested') && <button type="button" className="app-icon-button" title="Submit claim" aria-label={`Submit ${expense.title}`} onClick={() => void submitExistingClaim(expense)}><ArrowDownToLine size={15} /></button>}{canReview && expense.status === 'Pending Approval' && <><button type="button" className="app-icon-button app-approve" title="Approve" aria-label={`Approve ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Approved'); setFormError(''); }}><Check size={16} /></button><button type="button" className="app-icon-button app-reject" title="Reject" aria-label={`Reject ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Rejected'); setFormError(''); }}><X size={16} /></button><button type="button" className="app-icon-button" title="Request changes" aria-label={`Request changes for ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Changes Requested'); setFormError(''); }}><FileText size={15} /></button></>}</div></td></tr>)}
               {!loading && visibleExpenses.length === 0 && <tr><td colSpan={9} className="app-table-message">No claims match these filters.</td></tr>}
             </tbody></table></div>
           </section>}
@@ -457,7 +506,22 @@ export const AppWorkspace = () => {
         </main>
       </div>
 
-      {showClaimForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowClaimForm(false); }}><section className="app-modal" role="dialog" aria-modal="true" aria-labelledby="new-claim-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM DETAILS</span><h2 id="new-claim-title">Submit an expense</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowClaimForm(false)}><X size={18} /></button></div><form className="app-form-grid" onSubmit={claimForm.handleSubmit(handleClaimSubmit)}><label className="app-form-field app-form-field--full"><span>Expense title</span><input maxLength={200} {...claimForm.register('title')} placeholder="e.g. Client travel" />{claimForm.formState.errors.title && <small role="alert" className="app-form-error">{claimForm.formState.errors.title.message}</small>}</label><label className="app-form-field"><span>Category</span><select {...claimForm.register('categoryId')}><option value="">Select category</option>{categories.map((item) => <option key={item.categoryId} value={item.categoryId}>{item.name}</option>)}</select>{claimForm.formState.errors.categoryId && <small role="alert" className="app-form-error">{claimForm.formState.errors.categoryId.message}</small>}</label><label className="app-form-field"><span>Department</span><select {...claimForm.register('departmentId')}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select>{claimForm.formState.errors.departmentId && <small role="alert" className="app-form-error">{claimForm.formState.errors.departmentId.message}</small>}</label><label className="app-form-field"><span>Amount (ZAR)</span><input type="number" min="0.01" step="0.01" {...claimForm.register('amount')} placeholder="0.00" />{claimForm.formState.errors.amount && <small role="alert" className="app-form-error">{claimForm.formState.errors.amount.message}</small>}</label><label className="app-form-field"><span>Expense date</span><input type="date" {...claimForm.register('expenseDate')} />{claimForm.formState.errors.expenseDate && <small role="alert" className="app-form-error">{claimForm.formState.errors.expenseDate.message}</small>}</label><label className="app-form-field app-form-field--full"><span>Notes</span><textarea rows={3} {...claimForm.register('description')} placeholder="Add business purpose or context" />{claimForm.formState.errors.description && <small role="alert" className="app-form-error">{claimForm.formState.errors.description.message}</small>}</label><p className="app-form-note app-form-field--full">Receipt attachment is not enabled in this workspace yet.</p>{formError && <p role="alert" className="app-form-error app-form-field--full">{formError}</p>}<div className="app-modal-actions app-form-field--full"><button type="button" className="app-secondary-button" onClick={() => setShowClaimForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Submitting...' : 'Submit claim'}</button></div></form></section></div>}
+      {showClaimForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowClaimForm(false); }}>
+        <section className="app-modal" role="dialog" aria-modal="true" aria-labelledby="new-claim-title">
+          <div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM DETAILS</span><h2 id="new-claim-title">Submit an expense</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowClaimForm(false)}><X size={18} /></button></div>
+          <form className="app-form-grid" onSubmit={claimForm.handleSubmit(handleClaimSubmit)}>
+            <label className="app-form-field app-form-field--full"><span>Expense title</span><input maxLength={150} {...claimForm.register('title')} placeholder="e.g. Client travel" />{claimForm.formState.errors.title && <small role="alert" className="app-form-error">{claimForm.formState.errors.title.message}</small>}</label>
+            <label className="app-form-field"><span>Category</span><select {...claimForm.register('categoryId')}><option value="">Select category</option>{categories.map((item) => <option key={item.categoryId} value={item.categoryId}>{item.name}</option>)}</select>{claimForm.formState.errors.categoryId && <small role="alert" className="app-form-error">{claimForm.formState.errors.categoryId.message}</small>}</label>
+            <label className="app-form-field"><span>Department</span><select {...claimForm.register('departmentId')}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select>{claimForm.formState.errors.departmentId && <small role="alert" className="app-form-error">{claimForm.formState.errors.departmentId.message}</small>}</label>
+            <label className="app-form-field"><span>Amount (ZAR)</span><input type="number" min="0.01" step="0.01" {...claimForm.register('amount')} placeholder="0.00" />{claimForm.formState.errors.amount && <small role="alert" className="app-form-error">{claimForm.formState.errors.amount.message}</small>}</label>
+            <label className="app-form-field"><span>Expense date</span><input type="date" {...claimForm.register('expenseDate')} />{claimForm.formState.errors.expenseDate && <small role="alert" className="app-form-error">{claimForm.formState.errors.expenseDate.message}</small>}</label>
+            <label className="app-form-field app-form-field--full"><span>Notes</span><textarea rows={3} {...claimForm.register('description')} placeholder="Add business purpose or context" />{claimForm.formState.errors.description && <small role="alert" className="app-form-error">{claimForm.formState.errors.description.message}</small>}</label>
+            <label className="app-form-field app-form-field--full"><span>Receipt (PDF, JPEG or PNG; max 10 MiB)</span><input type="file" accept="application/pdf,image/jpeg,image/png" onChange={(event) => setReceiptFile(event.target.files?.[0] ?? null)} />{receiptFile && <small>{receiptFile.name}</small>}</label>
+            {formError && <p role="alert" className="app-form-error app-form-field--full">{formError}</p>}
+            <div className="app-modal-actions app-form-field--full"><button type="button" className="app-secondary-button" onClick={() => setShowClaimForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Submitting...' : 'Submit claim'}</button></div>
+          </form>
+        </section>
+      </div>}
 
       {reviewTarget && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewTarget(null); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM HL-{String(reviewTarget.expenseId).padStart(5, '0')}</span><h2 id="review-title">{reviewAction} claim</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setReviewTarget(null)}><X size={18} /></button></div><p className="app-review-summary"><strong>{reviewTarget.title}</strong><span>{reviewTarget.userFullName} · {money(reviewTarget.amount)}</span></p><form onSubmit={submitReview} className="app-review-form"><label className="app-form-field"><span>Comment</span><textarea maxLength={500} rows={4} value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} placeholder="Add context for this decision" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setReviewTarget(null)}>Cancel</button><button type="submit" className={`app-primary-button ${reviewAction === 'Rejected' ? 'is-danger' : ''}`} disabled={busy}>{busy ? 'Saving...' : `Confirm ${reviewAction.toLowerCase()}`}</button></div></form></section></div>}
 
@@ -473,7 +537,8 @@ export const AppWorkspace = () => {
 };
 
 const BudgetMeter = ({ budget, compact = false }: { budget: Budget; compact?: boolean }) => {
-  const percent = budget.allocatedAmount > 0 ? Math.max(0, (budget.spentAmount / budget.allocatedAmount) * 100) : 0;
+  const committedAndApproved = budget.committedAmount + budget.approvedAmount;
+  const percent = budget.allocatedAmount > 0 ? Math.max(0, (committedAndApproved / budget.allocatedAmount) * 100) : 0;
   const state = percent > 90 ? 'critical' : percent >= 75 ? 'warning' : 'healthy';
-  return <article className={`app-budget-card ${compact ? 'is-compact' : ''}`}><div className="app-budget-card-top"><div className="app-budget-title"><span className="app-department-icon"><Building2 size={16} /></span><h3>{budget.departmentName}</h3></div><span className={`app-budget-percent is-${state}`}>{percent.toFixed(0)}%</span></div><div className={`app-budget-track is-${state}`} role="progressbar" aria-valuenow={Math.round(percent)} aria-valuemin={0} aria-valuemax={100} aria-label={`${budget.departmentName} budget used`}><span style={{ width: `${Math.min(percent, 100)}%` }} /></div><div className="app-budget-figures"><span><small>Allocated</small><strong>{money(budget.allocatedAmount)}</strong></span><span><small>Spent</small><strong>{money(budget.spentAmount)}</strong></span><span><small>Remaining</small><strong>{money(budget.remainingAmount)}</strong></span></div></article>;
+  return <article className={`app-budget-card ${compact ? 'is-compact' : ''}`}><div className="app-budget-card-top"><div className="app-budget-title"><span className="app-department-icon"><Building2 size={16} /></span><h3>{budget.departmentName}</h3></div><span className={`app-budget-percent is-${state}`}>{percent.toFixed(0)}%</span></div><div className={`app-budget-track is-${state}`} role="progressbar" aria-valuenow={Math.round(percent)} aria-valuemin={0} aria-valuemax={100} aria-label={`${budget.departmentName} budget committed or approved`}><span style={{ width: `${Math.min(percent, 100)}%` }} /></div><div className="app-budget-figures"><span><small>Allocated</small><strong>{money(budget.allocatedAmount)}</strong></span><span><small>Committed / approved</small><strong>{money(committedAndApproved)}</strong></span><span><small>Remaining</small><strong>{money(budget.remainingAmount)}</strong></span></div></article>;
 };

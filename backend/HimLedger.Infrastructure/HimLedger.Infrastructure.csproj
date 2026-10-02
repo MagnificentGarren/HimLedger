@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <PackageReference Include="Azure.Storage.Blobs" />
     <ProjectReference Include="..\HimLedger.Application\HimLedger.Application.csproj" />
     <ProjectReference Include="..\HimLedger.Domain\HimLedger.Domain.csproj" />
   </ItemGroup>

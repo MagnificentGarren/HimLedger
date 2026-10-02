@@ -5,6 +5,7 @@ using System.Text;
 using HimLedger.Api;
 using HimLedger.Infrastructure;
 using HimLedger.Infrastructure.Services;
+using HimLedger.Api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -53,6 +54,9 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 builder.Services.AddScoped<JwtTokenService>();
+builder.Services.AddScoped<IReceiptStorage, AzureReceiptStorage>();
+builder.Services.AddHttpClient(nameof(NotificationOutboxDispatcher));
+builder.Services.AddHostedService<NotificationOutboxDispatcher>();
 
 var jwtSecret = builder.Configuration["JwtSettings:Secret"];
 if (string.IsNullOrWhiteSpace(jwtSecret) && builder.Environment.IsDevelopment())

@@ -11,7 +11,7 @@ public class Expense
     public decimal Amount { get; set; }
     public DateTime ExpenseDate { get; set; }
     public string? ReceiptUrl { get; set; }
-    public string Status { get; set; } = "Pending";
+    public string Status { get; set; } = ClaimStatuses.Draft;
     public byte[] RowVersion { get; set; } = [];
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
@@ -19,4 +19,6 @@ public class Expense
     public Category Category { get; set; } = null!;
     public Department Department { get; set; } = null!;
     public ICollection<ApprovalLog> ApprovalLogs { get; set; } = new List<ApprovalLog>();
+    public ICollection<ClaimStatusHistory> StatusHistory { get; set; } = new List<ClaimStatusHistory>();
+    public ICollection<ExpenseAttachment> Attachments { get; set; } = new List<ExpenseAttachment>();
 }

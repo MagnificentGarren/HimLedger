@@ -91,7 +91,8 @@ CREATE TABLE Expenses (
     Amount DECIMAL(18,2) NOT NULL CHECK (Amount > 0),
     ExpenseDate DATE NOT NULL,
     ReceiptUrl NVARCHAR(2083) NULL,
-    Status NVARCHAR(20) NOT NULL DEFAULT 'Pending' CHECK (Status IN ('Pending', 'Approved', 'Rejected')),
+    Status NVARCHAR(30) NOT NULL DEFAULT 'Draft'
+        CHECK (Status IN ('Draft', 'Submitted', 'Pending Approval', 'Approved', 'Rejected', 'Changes Requested', 'Resubmitted', 'Reimbursed')),
     RowVersion ROWVERSION NOT NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (UserId) REFERENCES Users(UserId),
@@ -104,11 +105,77 @@ CREATE TABLE ApprovalLogs (
     ApprovalLogId INT IDENTITY(1,1) PRIMARY KEY,
     ExpenseId INT NOT NULL,
     ReviewedByUserId INT NOT NULL,
-    Action NVARCHAR(20) NOT NULL CHECK (Action IN ('Approved', 'Rejected')),
+    Action NVARCHAR(40) NOT NULL CHECK (Action IN ('Approved', 'Rejected', 'Changes Requested', 'Reimbursed')),
     Comments NVARCHAR(500) NULL,
     ActionedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (ExpenseId) REFERENCES Expenses(ExpenseId),
     FOREIGN KEY (ReviewedByUserId) REFERENCES Users(UserId)
+);
+
+-- Immutable lifecycle ledger. The trigger also protects against direct SQL updates/deletes.
+CREATE TABLE ClaimStatusHistory (
+    ClaimStatusHistoryId BIGINT IDENTITY(1,1) PRIMARY KEY,
+    ExpenseId INT NOT NULL,
+    ActorUserId INT NOT NULL,
+    FromStatus NVARCHAR(30) NOT NULL,
+    ToStatus NVARCHAR(30) NOT NULL,
+    Decision NVARCHAR(40) NOT NULL,
+    Notes NVARCHAR(1000) NULL,
+    OccurredAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    FOREIGN KEY (ExpenseId) REFERENCES Expenses(ExpenseId),
+    FOREIGN KEY (ActorUserId) REFERENCES Users(UserId)
+);
+
+GO
+CREATE TRIGGER dbo.TR_ClaimStatusHistory_AppendOnly
+ON dbo.ClaimStatusHistory
+INSTEAD OF UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    THROW 51000, 'ClaimStatusHistory is append-only.', 1;
+END;
+GO
+
+CREATE TABLE ApprovalDelegations (
+    ApprovalDelegationId INT IDENTITY(1,1) PRIMARY KEY,
+    DepartmentId INT NOT NULL,
+    DelegatorUserId INT NOT NULL,
+    DelegateUserId INT NOT NULL,
+    StartsAt DATETIMEOFFSET NOT NULL,
+    EndsAt DATETIMEOFFSET NOT NULL,
+    CreatedAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT CK_ApprovalDelegations_DateRange CHECK (StartsAt < EndsAt),
+    FOREIGN KEY (DepartmentId) REFERENCES Departments(DepartmentId),
+    FOREIGN KEY (DelegatorUserId) REFERENCES Users(UserId),
+    FOREIGN KEY (DelegateUserId) REFERENCES Users(UserId)
+);
+
+CREATE TABLE ExpenseAttachments (
+    ExpenseAttachmentId INT IDENTITY(1,1) PRIMARY KEY,
+    ExpenseId INT NOT NULL,
+    UploadedByUserId INT NOT NULL,
+    BlobName NVARCHAR(200) NOT NULL UNIQUE,
+    FileName NVARCHAR(255) NOT NULL,
+    ContentType NVARCHAR(100) NOT NULL,
+    SizeBytes BIGINT NOT NULL,
+    UploadedAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    FOREIGN KEY (ExpenseId) REFERENCES Expenses(ExpenseId),
+    FOREIGN KEY (UploadedByUserId) REFERENCES Users(UserId)
+);
+
+CREATE TABLE NotificationOutboxMessages (
+    NotificationOutboxMessageId BIGINT IDENTITY(1,1) PRIMARY KEY,
+    IdempotencyKey NVARCHAR(100) NOT NULL UNIQUE,
+    EventType NVARCHAR(100) NOT NULL,
+    Payload NVARCHAR(MAX) NOT NULL,
+    CreatedAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    DispatchedAt DATETIMEOFFSET NULL,
+    LockedUntil DATETIMEOFFSET NULL,
+    LockId NVARCHAR(MAX) NULL,
+    NextAttemptAt DATETIMEOFFSET NULL,
+    Attempts INT NOT NULL DEFAULT 0,
+    LastError NVARCHAR(2000) NULL
 );
 
 -- Indexing for performance
@@ -116,3 +183,8 @@ CREATE INDEX IX_Expenses_UserId ON Expenses(UserId);
 CREATE INDEX IX_Expenses_CategoryId ON Expenses(CategoryId);
 CREATE INDEX IX_Expenses_DepartmentId_Status ON Expenses(DepartmentId, Status);
 CREATE INDEX IX_Budgets_DepartmentId ON Budgets(DepartmentId);
+CREATE INDEX IX_ClaimStatusHistory_ExpenseId_OccurredAt ON ClaimStatusHistory(ExpenseId, OccurredAt);
+CREATE INDEX IX_ApprovalDelegations_DepartmentId_DelegateUserId_StartsAt_EndsAt
+    ON ApprovalDelegations(DepartmentId, DelegateUserId, StartsAt, EndsAt);
+CREATE INDEX IX_NotificationOutboxMessages_DispatchedAt_NextAttemptAt_LockedUntil
+    ON NotificationOutboxMessages(DispatchedAt, NextAttemptAt, LockedUntil);

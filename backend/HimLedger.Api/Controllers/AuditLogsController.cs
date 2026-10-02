@@ -18,38 +18,41 @@ public class AuditLogsController(ApplicationDbContext context) : ControllerBase
         [FromQuery, Range(1, 21_474_836)] int page = 1,
         [FromQuery, Range(1, 100)] int pageSize = 25)
     {
-        var records = await context.ApprovalLogs
-            .OrderByDescending(log => log.ActionedAt)
-            .ThenByDescending(log => log.ApprovalLogId)
-            .Select(log => new
+        var records = await context.ClaimStatusHistory
+            .OrderByDescending(history => history.OccurredAt)
+            .ThenByDescending(history => history.ClaimStatusHistoryId)
+            .Select(history => new
             {
-                log.ApprovalLogId,
-                log.ActionedAt,
-                log.ExpenseId,
-                ExpenseTitle = log.Expense.Title,
-                log.Action,
-                ReviewedBy = log.ReviewedByUser.FirstName + " " + log.ReviewedByUser.LastName,
-                log.Comments
+                history.ClaimStatusHistoryId,
+                history.OccurredAt,
+                history.ExpenseId,
+                ExpenseTitle = history.Expense.Title,
+                Action = history.FromStatus == string.Empty
+                    ? history.ToStatus
+                    : history.FromStatus + " -> " + history.ToStatus,
+                ReviewedBy = history.Actor.FirstName + " " + history.Actor.LastName,
+                history.Notes
             })
             .ToPagedResponseAsync(page, pageSize, cancellationToken);
 
         return Ok(new PagedResponse<AuditLogItem>(
             records.Items.Select(record => new AuditLogItem(
-                record.ApprovalLogId,
-                DateTime.SpecifyKind(record.ActionedAt, DateTimeKind.Utc),
+                record.ClaimStatusHistoryId,
+                record.OccurredAt,
                 record.ExpenseId,
                 record.ExpenseTitle,
                 record.Action,
                 record.ReviewedBy,
-                record.Comments)).ToArray(),
+                record.Notes)).ToArray(),
             records.Page,
             records.PageSize,
             records.TotalCount));
     }
 
+    /// <summary>One immutable claim lifecycle event.</summary>
     public sealed record AuditLogItem(
-        int ApprovalLogId,
-        DateTime TimestampUtc,
+        long ApprovalLogId,
+        DateTimeOffset TimestampUtc,
         int ExpenseId,
         string ExpenseTitle,
         string Action,

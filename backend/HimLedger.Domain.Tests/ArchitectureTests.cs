@@ -18,15 +18,35 @@ public class ArchitectureTests
     }
 
     [Fact]
-    public void New_expenses_start_pending_with_a_UTC_creation_time()
+    public void New_expenses_start_as_drafts_with_a_UTC_creation_time()
     {
         var before = DateTime.UtcNow;
         var expense = new Expense();
         var after = DateTime.UtcNow;
 
-        Assert.Equal("Pending", expense.Status);
+        Assert.Equal(ClaimStatuses.Draft, expense.Status);
         Assert.InRange(expense.CreatedAt, before, after);
         Assert.Equal(DateTimeKind.Utc, expense.CreatedAt.Kind);
+    }
+
+    [Theory]
+    [InlineData(ClaimStatuses.Draft, ClaimStatuses.Submitted, true)]
+    [InlineData(ClaimStatuses.Submitted, ClaimStatuses.PendingApproval, true)]
+    [InlineData(ClaimStatuses.PendingApproval, ClaimStatuses.Approved, true)]
+    [InlineData(ClaimStatuses.PendingApproval, ClaimStatuses.Rejected, true)]
+    [InlineData(ClaimStatuses.PendingApproval, ClaimStatuses.ChangesRequested, true)]
+    [InlineData(ClaimStatuses.Approved, ClaimStatuses.Reimbursed, true)]
+    [InlineData(ClaimStatuses.ChangesRequested, ClaimStatuses.Resubmitted, true)]
+    [InlineData(ClaimStatuses.Resubmitted, ClaimStatuses.PendingApproval, true)]
+    [InlineData(ClaimStatuses.Draft, ClaimStatuses.Approved, false)]
+    [InlineData(ClaimStatuses.Rejected, ClaimStatuses.Resubmitted, false)]
+    [InlineData(ClaimStatuses.Reimbursed, ClaimStatuses.Approved, false)]
+    public void Claim_status_transitions_match_the_lifecycle(
+        string from,
+        string to,
+        bool expected)
+    {
+        Assert.Equal(expected, ClaimStatuses.CanTransition(from, to));
     }
 
     [Fact]

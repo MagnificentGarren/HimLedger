@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Security.Claims;
 using HimLedger.Domain.Entities;
 using HimLedger.Infrastructure;
+using HimLedger.Infrastructure.Services;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
@@ -35,6 +36,8 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             {
                 services.RemoveAll<DbContextOptions<ApplicationDbContext>>();
                 services.RemoveAll<ApplicationDbContext>();
+                services.RemoveAll<IReceiptStorage>();
+                services.AddSingleton<IReceiptStorage, TestReceiptStorage>();
                 var options = new DbContextOptionsBuilder<ApplicationDbContext>()
                     .UseInMemoryDatabase(databaseName)
                     .Options;
@@ -67,8 +70,32 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             new User { UserId = 13, FirstName = "Fin", LastName = "Analyst", Email = "finance@example.com", RoleId = 4 },
             new User { UserId = 14, FirstName = "Una", LastName = "Assigned", Email = "unassigned@example.com", RoleId = 2 });
         context.Expenses.AddRange(
-            new Expense { ExpenseId = 101, UserId = 11, CategoryId = 1, DepartmentId = 1, Title = "North claim", Amount = 10, ExpenseDate = DateTime.UtcNow, Status = "Pending", RowVersion = new byte[8] },
-            new Expense { ExpenseId = 202, UserId = 12, CategoryId = 1, DepartmentId = 2, Title = "South claim", Amount = 20, ExpenseDate = DateTime.UtcNow, Status = "Pending", RowVersion = new byte[8] });
+            new Expense { ExpenseId = 101, UserId = 11, CategoryId = 1, DepartmentId = 1, Title = "North claim", Amount = 10, ExpenseDate = DateTime.UtcNow.Date, Status = ClaimStatuses.PendingApproval, RowVersion = new byte[8] },
+            new Expense { ExpenseId = 202, UserId = 12, CategoryId = 1, DepartmentId = 2, Title = "South claim", Amount = 20, ExpenseDate = DateTime.UtcNow.Date, Status = ClaimStatuses.PendingApproval, RowVersion = new byte[8] },
+            new Expense { ExpenseId = 303, UserId = 10, CategoryId = 1, DepartmentId = 1, Title = "Delegated claim", Amount = 30, ExpenseDate = DateTime.UtcNow.Date, Status = ClaimStatuses.PendingApproval, RowVersion = new byte[8] });
+        context.ClaimStatusHistory.AddRange(
+            new ClaimStatusHistory { ExpenseId = 101, ActorUserId = 11, ToStatus = ClaimStatuses.PendingApproval, Decision = "Imported" },
+            new ClaimStatusHistory { ExpenseId = 202, ActorUserId = 12, ToStatus = ClaimStatuses.PendingApproval, Decision = "Imported" },
+            new ClaimStatusHistory { ExpenseId = 303, ActorUserId = 10, ToStatus = ClaimStatuses.PendingApproval, Decision = "Imported" });
+        context.Budgets.AddRange(
+            new Budget
+            {
+                DepartmentId = 1,
+                FiscalYear = DateTime.UtcNow.Year,
+                FiscalQuarter = ((DateTime.UtcNow.Month - 1) / 3) + 1,
+                AllocatedAmount = 1000,
+                RemainingAmount = 1000,
+                RowVersion = new byte[8]
+            },
+            new Budget
+            {
+                DepartmentId = 2,
+                FiscalYear = DateTime.UtcNow.Year,
+                FiscalQuarter = ((DateTime.UtcNow.Month - 1) / 3) + 1,
+                AllocatedAmount = 1000,
+                RemainingAmount = 1000,
+                RowVersion = new byte[8]
+            });
         context.SaveChanges();
     }
 
@@ -237,6 +264,290 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Claim_submission_records_each_lifecycle_transition_and_outbox_event()
+    {
+        SetUserToken(11);
+        using var createResponse = await _client.PostAsJsonAsync("/api/Expenses", new
+        {
+            categoryId = 1,
+            departmentId = 1,
+            title = "Lifecycle test",
+            amount = 18,
+            expenseDate = DateTime.UtcNow
+        });
+        using var draft = await createResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Equal(System.Net.HttpStatusCode.Created, createResponse.StatusCode);
+        Assert.NotNull(draft);
+        var expenseId = draft.RootElement.GetProperty("expenseId").GetInt32();
+        Assert.Equal(ClaimStatuses.Draft, draft.RootElement.GetProperty("status").GetString());
+
+        using var submitResponse = await _client.PostAsJsonAsync($"/api/Expenses/{expenseId}/submit", new { notes = "Ready" });
+        using var currentResponse = await _client.GetAsync($"/api/Expenses/{expenseId}");
+        using var current = await currentResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        using var historyResponse = await _client.GetAsync($"/api/Expenses/{expenseId}/history");
+        using var history = await historyResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, submitResponse.StatusCode);
+        using var duplicateSubmitResponse = await _client.PostAsJsonAsync(
+            $"/api/Expenses/{expenseId}/submit", new { notes = "Retry" });
+        Assert.Equal(ClaimStatuses.PendingApproval, current!.RootElement.GetProperty("status").GetString());
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, duplicateSubmitResponse.StatusCode);
+        Assert.Equal(
+            new[] { ClaimStatuses.Draft, ClaimStatuses.Submitted, ClaimStatuses.PendingApproval },
+            history!.RootElement.EnumerateArray().Select(item => item.GetProperty("toStatus").GetString()).ToArray());
+        using var scope = _testFactory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(2, await context.NotificationOutboxMessages.CountAsync(item =>
+            item.Payload.Contains($"\"expenseId\":{expenseId}", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Invalid_lifecycle_transitions_are_rejected()
+    {
+        SetUserToken(11);
+        using var response = await _client.PostAsJsonAsync("/api/Expenses/101/resubmit", new { notes = "Not requested" });
+
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Changes_requested_claim_can_be_resubmitted_to_pending_approval()
+    {
+        SetUserToken(10);
+        using var reviewResponse = await _client.PutAsJsonAsync("/api/Expenses/101/status", new
+        {
+            status = ClaimStatuses.ChangesRequested,
+            comments = "Please add a business purpose.",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, reviewResponse.StatusCode);
+
+        SetUserToken(11);
+        using var resubmitResponse = await _client.PostAsJsonAsync("/api/Expenses/101/resubmit", new { notes = "Added purpose." });
+        using var claimResponse = await _client.GetAsync("/api/Expenses/101");
+        using var claim = await claimResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, resubmitResponse.StatusCode);
+        Assert.Equal(ClaimStatuses.PendingApproval, claim!.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Active_department_delegation_allows_another_user_to_approve()
+    {
+        var now = DateTimeOffset.UtcNow;
+        SetUserToken(10);
+        using var delegationResponse = await _client.PostAsJsonAsync("/api/ApprovalDelegations", new
+        {
+            delegateUserId = 11,
+            startsAt = now.AddMinutes(-1),
+            endsAt = now.AddDays(1)
+        });
+        Assert.Equal(System.Net.HttpStatusCode.Created, delegationResponse.StatusCode);
+
+        SetUserToken(11);
+        using var reviewResponse = await _client.PutAsJsonAsync("/api/Expenses/303/status", new
+        {
+            status = ClaimStatuses.Approved,
+            comments = "Delegated approval",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, reviewResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Approved_claim_can_be_reimbursed_by_finance()
+    {
+        SetUserToken(10);
+        using var approveResponse = await _client.PutAsJsonAsync("/api/Expenses/101/status", new
+        {
+            status = ClaimStatuses.Approved,
+            comments = "Within budget",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, approveResponse.StatusCode);
+
+        SetUserToken(13);
+        using var reimburseResponse = await _client.PostAsJsonAsync("/api/Expenses/101/reimburse", new
+        {
+            notes = "Paid"
+        });
+        using var claimResponse = await _client.GetAsync("/api/Expenses/101");
+        using var claim = await claimResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, reimburseResponse.StatusCode);
+        Assert.Equal(ClaimStatuses.Reimbursed, claim!.RootElement.GetProperty("status").GetString());
+
+        SetUserToken(13);
+        var year = DateTime.UtcNow.Year;
+        var quarter = ((DateTime.UtcNow.Month - 1) / 3) + 1;
+        using var budgetResponse = await _client.GetAsync($"/api/Budgets?fiscalYear={year}&fiscalQuarter={quarter}");
+        using var budgets = await budgetResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        var departmentBudget = budgets!.RootElement.GetProperty("items").EnumerateArray()
+            .Single(item => item.GetProperty("departmentId").GetInt32() == 1);
+        Assert.Equal(10m, departmentBudget.GetProperty("approvedAmount").GetDecimal());
+        Assert.Equal(10m, departmentBudget.GetProperty("reimbursedAmount").GetDecimal());
+        Assert.Equal(960m, departmentBudget.GetProperty("remainingAmount").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Employee_cannot_approve_their_own_claim_through_delegation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        SetUserToken(10);
+        using var delegationResponse = await _client.PostAsJsonAsync("/api/ApprovalDelegations", new
+        {
+            delegateUserId = 11,
+            startsAt = now.AddMinutes(-1),
+            endsAt = now.AddDays(1)
+        });
+        Assert.Equal(System.Net.HttpStatusCode.Created, delegationResponse.StatusCode);
+
+        SetUserToken(11);
+        using var reviewResponse = await _client.PutAsJsonAsync("/api/Expenses/101/status", new
+        {
+            status = ClaimStatuses.Approved,
+            comments = "Self approval",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, reviewResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Receipt_upload_rejects_content_that_does_not_match_an_allowed_file_type()
+    {
+        SetUserToken(11);
+        using var createResponse = await _client.PostAsJsonAsync("/api/Expenses", new
+        {
+            categoryId = 1,
+            departmentId = 1,
+            title = "Invalid receipt test",
+            amount = 15,
+            expenseDate = DateTime.UtcNow
+        });
+        using var draft = await createResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Equal(System.Net.HttpStatusCode.Created, createResponse.StatusCode);
+        var expenseId = draft!.RootElement.GetProperty("expenseId").GetInt32();
+
+        using var multipart = new MultipartFormDataContent();
+        multipart.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("not a receipt")), "file", "receipt.png");
+
+        using var response = await _client.PostAsync($"/api/Expenses/{expenseId}/attachments", multipart);
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Valid_pdf_receipt_is_saved_and_served_with_a_temporary_read_url()
+    {
+        SetUserToken(11);
+        using var createResponse = await _client.PostAsJsonAsync("/api/Expenses", new
+        {
+            categoryId = 1,
+            departmentId = 1,
+            title = "Valid receipt test",
+            amount = 15,
+            expenseDate = DateTime.UtcNow
+        });
+        using var draft = await createResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        var expenseId = draft!.RootElement.GetProperty("expenseId").GetInt32();
+        using var multipart = new MultipartFormDataContent();
+        multipart.Add(
+            new ByteArrayContent(Encoding.ASCII.GetBytes("%PDF-1.7\nreceipt")),
+            "file",
+            "receipt.pdf");
+
+        using var uploadResponse = await _client.PostAsync($"/api/Expenses/{expenseId}/attachments", multipart);
+        using var uploadBody = await uploadResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        var attachmentId = uploadBody!.RootElement.GetProperty("expenseAttachmentId").GetInt32();
+        using var downloadResponse = await _client.GetAsync(
+            $"/api/Expenses/{expenseId}/attachments/{attachmentId}");
+        using var downloadBody = await downloadResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(System.Net.HttpStatusCode.Created, uploadResponse.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.OK, downloadResponse.StatusCode);
+        Assert.Equal(300, downloadBody!.RootElement.GetProperty("expiresInSeconds").GetInt32());
+        Assert.StartsWith("https://example.test/", downloadBody.RootElement.GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public async Task Budgets_report_committed_approved_and_reimbursed_claims_from_expenses()
+    {
+        SetUserToken(1);
+        var year = DateTime.UtcNow.Year;
+        var quarter = ((DateTime.UtcNow.Month - 1) / 3) + 1;
+        using var response = await _client.GetAsync($"/api/Budgets?fiscalYear={year}&fiscalQuarter={quarter}");
+        using var body = await response.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        var departmentBudget = body!.RootElement.GetProperty("items").EnumerateArray()
+            .Single(item => item.GetProperty("departmentId").GetInt32() == 1);
+
+        Assert.Equal(40m, departmentBudget.GetProperty("committedAmount").GetDecimal());
+        Assert.Equal(0m, departmentBudget.GetProperty("approvedAmount").GetDecimal());
+        Assert.Equal(0m, departmentBudget.GetProperty("reimbursedAmount").GetDecimal());
+        Assert.Equal(960m, departmentBudget.GetProperty("remainingAmount").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Approval_is_rejected_when_commitment_would_exceed_the_department_budget()
+    {
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var budget = await context.Budgets.SingleAsync(item => item.DepartmentId == 1);
+            budget.AllocatedAmount = 35;
+            await context.SaveChangesAsync();
+        }
+
+        SetUserToken(10);
+        using var response = await _client.PutAsJsonAsync("/api/Expenses/101/status", new
+        {
+            status = ClaimStatuses.Approved,
+            comments = "Test budget limit",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Reconciliation_csv_filters_line_items_and_includes_the_audit_trace()
+    {
+        SetUserToken(1);
+        var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        using var response = await _client.GetAsync(
+            $"/api/Expenses/reconciliation.csv?fromDate={date}&toDate={date}&departmentId=1&categoryId=1");
+        var csv = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.StartsWith("ExpenseId,UserId,Title,Amount", csv, StringComparison.Ordinal);
+        Assert.Contains("\"101\"", csv, StringComparison.Ordinal);
+        Assert.Contains("actor=11", csv, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"202\"", csv, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Claim_status_history_rejects_update_and_delete_operations()
+    {
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var history = await context.ClaimStatusHistory.FirstAsync();
+            history.Notes = "tampered";
+            await Assert.ThrowsAsync<InvalidOperationException>(() => context.SaveChangesAsync());
+        }
+
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var history = await context.ClaimStatusHistory.FirstAsync();
+            context.ClaimStatusHistory.Remove(history);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => context.SaveChangesAsync());
+        }
+    }
+
     private void SetUserToken(int userId, params Claim[] extraClaims)
     {
         var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, userId.ToString()) };
@@ -264,5 +575,17 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         _client.Dispose();
         _testFactory.Dispose();
+    }
+
+    private sealed class TestReceiptStorage : IReceiptStorage
+    {
+        public Task StoreAsync(string blobName, Stream content, string contentType, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<Uri> CreateReadSasAsync(string blobName, CancellationToken cancellationToken) =>
+            Task.FromResult(new Uri("https://example.test/receipt?sig=test"));
+
+        public Task DeleteIfExistsAsync(string blobName, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 }

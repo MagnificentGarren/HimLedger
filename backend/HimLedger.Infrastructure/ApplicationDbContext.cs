@@ -24,6 +24,24 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<Budget> Budgets => Set<Budget>();
     public DbSet<Expense> Expenses => Set<Expense>();
     public DbSet<ApprovalLog> ApprovalLogs => Set<ApprovalLog>();
+    public DbSet<ClaimStatusHistory> ClaimStatusHistory => Set<ClaimStatusHistory>();
+    public DbSet<ApprovalDelegation> ApprovalDelegations => Set<ApprovalDelegation>();
+    public DbSet<ExpenseAttachment> ExpenseAttachments => Set<ExpenseAttachment>();
+    public DbSet<NotificationOutboxMessage> NotificationOutboxMessages => Set<NotificationOutboxMessage>();
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        EnsureAppendOnlyHistory();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureAppendOnlyHistory();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -117,7 +135,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(expense => expense.Amount).HasPrecision(18, 2);
             entity.Property(expense => expense.ExpenseDate).HasColumnType("date");
             entity.Property(expense => expense.ReceiptUrl).HasMaxLength(2083);
-            entity.Property(expense => expense.Status).HasMaxLength(20).HasDefaultValue("Pending");
+            entity.Property(expense => expense.Status).HasMaxLength(30).HasDefaultValue(ClaimStatuses.Draft);
             entity.Property(expense => expense.RowVersion).IsRowVersion();
             entity.Property(expense => expense.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.HasIndex(expense => new { expense.DepartmentId, expense.Status });
@@ -125,7 +143,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_Expenses_Amount", "Amount > 0"));
             entity.ToTable(table => table.HasCheckConstraint(
-                "CK_Expenses_Status", "Status IN ('Pending', 'Approved', 'Rejected')"));
+                "CK_Expenses_Status", "Status IN ('Draft', 'Submitted', 'Pending Approval', 'Approved', 'Rejected', 'Changes Requested', 'Resubmitted', 'Reimbursed')"));
             entity.HasOne(expense => expense.User)
                 .WithMany(user => user.Expenses)
                 .HasForeignKey(expense => expense.UserId)
@@ -142,11 +160,11 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
 
         modelBuilder.Entity<ApprovalLog>(entity =>
         {
-            entity.Property(log => log.Action).HasMaxLength(20);
+            entity.Property(log => log.Action).HasMaxLength(40);
             entity.Property(log => log.Comments).HasMaxLength(500);
             entity.Property(log => log.ActionedAt).HasDefaultValueSql("GETUTCDATE()");
             entity.ToTable(table => table.HasCheckConstraint(
-                "CK_ApprovalLogs_Action", "Action IN ('Approved', 'Rejected')"));
+                "CK_ApprovalLogs_Action", "Action IN ('Approved', 'Rejected', 'Changes Requested', 'Reimbursed')"));
             entity.HasOne(log => log.Expense)
                 .WithMany(expense => expense.ApprovalLogs)
                 .HasForeignKey(log => log.ExpenseId)
@@ -156,5 +174,88 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
                 .HasForeignKey(log => log.ReviewedByUserId)
                 .OnDelete(DeleteBehavior.NoAction);
         });
+
+        modelBuilder.Entity<ClaimStatusHistory>(entity =>
+        {
+            entity.HasKey(history => history.ClaimStatusHistoryId);
+            entity.Property(history => history.FromStatus).HasMaxLength(30);
+            entity.Property(history => history.ToStatus).HasMaxLength(30);
+            entity.Property(history => history.Decision).HasMaxLength(40);
+            entity.Property(history => history.Notes).HasMaxLength(1000);
+            entity.Property(history => history.OccurredAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.HasIndex(history => new { history.ExpenseId, history.OccurredAt });
+            entity.HasOne(history => history.Expense)
+                .WithMany(expense => expense.StatusHistory)
+                .HasForeignKey(history => history.ExpenseId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(history => history.Actor)
+                .WithMany()
+                .HasForeignKey(history => history.ActorUserId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<ApprovalDelegation>(entity =>
+        {
+            entity.Property(delegation => delegation.StartsAt).HasColumnType("datetimeoffset");
+            entity.Property(delegation => delegation.EndsAt).HasColumnType("datetimeoffset");
+            entity.Property(delegation => delegation.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.HasIndex(delegation => new
+            {
+                delegation.DepartmentId,
+                delegation.DelegateUserId,
+                delegation.StartsAt,
+                delegation.EndsAt
+            });
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_ApprovalDelegations_DateRange", "StartsAt < EndsAt"));
+            entity.HasOne(delegation => delegation.Department)
+                .WithMany()
+                .HasForeignKey(delegation => delegation.DepartmentId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(delegation => delegation.Delegator)
+                .WithMany()
+                .HasForeignKey(delegation => delegation.DelegatorUserId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(delegation => delegation.Delegate)
+                .WithMany()
+                .HasForeignKey(delegation => delegation.DelegateUserId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<ExpenseAttachment>(entity =>
+        {
+            entity.Property(attachment => attachment.BlobName).HasMaxLength(200);
+            entity.Property(attachment => attachment.FileName).HasMaxLength(255);
+            entity.Property(attachment => attachment.ContentType).HasMaxLength(100);
+            entity.Property(attachment => attachment.UploadedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+            entity.HasIndex(attachment => attachment.BlobName).IsUnique();
+            entity.HasOne(attachment => attachment.Expense)
+                .WithMany(expense => expense.Attachments)
+                .HasForeignKey(attachment => attachment.ExpenseId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(attachment => attachment.UploadedBy)
+                .WithMany()
+                .HasForeignKey(attachment => attachment.UploadedByUserId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<NotificationOutboxMessage>(entity =>
+        {
+            entity.Property(message => message.IdempotencyKey).HasMaxLength(100);
+            entity.Property(message => message.EventType).HasMaxLength(100);
+            entity.Property(message => message.Payload).HasColumnType("nvarchar(max)");
+            entity.Property(message => message.LastError).HasMaxLength(2000);
+            entity.HasIndex(message => message.IdempotencyKey).IsUnique();
+            entity.HasIndex(message => new { message.DispatchedAt, message.NextAttemptAt, message.LockedUntil });
+        });
+    }
+
+    private void EnsureAppendOnlyHistory()
+    {
+        if (ChangeTracker.Entries<ClaimStatusHistory>()
+            .Any(entry => entry.State is EntityState.Modified or EntityState.Deleted))
+        {
+            throw new InvalidOperationException("Claim status history is append-only.");
+        }
     }
 }

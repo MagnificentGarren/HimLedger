@@ -1,7 +1,106 @@
 @HimLedger.Api_HostAddress = http://localhost:5228
+@token = replace-with-a-valid-bearer-token
+@claimId = 1
 
 ### API health
 GET {{HimLedger.Api_HostAddress}}/health
 Accept: text/plain
 
-###
+### Create a draft claim
+POST {{HimLedger.Api_HostAddress}}/api/Expenses
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "categoryId": 1,
+  "departmentId": 1,
+  "title": "Client travel",
+  "description": "Taxi to a customer meeting",
+  "amount": 245.50,
+  "expenseDate": "2026-10-02T00:00:00Z"
+}
+
+### List claims with reconciliation filters
+GET {{HimLedger.Api_HostAddress}}/api/Expenses?status=Pending%20Approval&fromDate=2026-10-01&toDate=2026-12-31&departmentId=1&categoryId=1
+Authorization: Bearer {{token}}
+
+### Upload a PDF/JPEG/PNG receipt as multipart form data
+POST {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/attachments
+Authorization: Bearer {{token}}
+Content-Type: multipart/form-data; boundary=HimLedgerBoundary
+
+--HimLedgerBoundary
+Content-Disposition: form-data; name="file"; filename="receipt.pdf"
+Content-Type: application/pdf
+
+< ./receipt.pdf
+--HimLedgerBoundary--
+
+### Get a five-minute read-only receipt SAS URL
+GET {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/attachments/1
+Authorization: Bearer {{token}}
+
+### Submit a draft (then automatically routes it to Pending Approval)
+POST {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/submit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "notes": "Ready for review"
+}
+
+### View lifecycle history
+GET {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/history
+Authorization: Bearer {{token}}
+
+### Review: approve, reject, or request changes
+PUT {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/status
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "status": "Changes Requested",
+  "comments": "Please provide the business purpose.",
+  "rowVersion": "AAAAAAAAAAA="
+}
+
+### Resubmit after changes are made
+POST {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/resubmit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "notes": "Added the business purpose."
+}
+
+### Record reimbursement (Finance/Admin)
+POST {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/reimburse
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "notes": "Paid in payroll batch 2026-10"
+}
+
+### Detect possible duplicate submissions (Manager/Admin/Finance)
+GET {{HimLedger.Api_HostAddress}}/api/Expenses/{{claimId}}/duplicates
+Authorization: Bearer {{token}}
+
+### Reconciliation export with optional period, department, and category filters
+GET {{HimLedger.Api_HostAddress}}/api/Expenses/reconciliation.csv?fromDate=2026-10-01&toDate=2026-12-31&departmentId=1&categoryId=1
+Authorization: Bearer {{token}}
+
+### Delegate approvals to another department user for a limited period
+POST {{HimLedger.Api_HostAddress}}/api/ApprovalDelegations
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "delegateUserId": 2,
+  "startsAt": "2026-10-02T00:00:00Z",
+  "endsAt": "2026-10-09T00:00:00Z"
+}
+
+### Read a delegation created by this manager
+GET {{HimLedger.Api_HostAddress}}/api/ApprovalDelegations/1
+Authorization: Bearer {{token}}

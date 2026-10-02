@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Data;
 using HimLedger.Api.Models;
 using HimLedger.Infrastructure;
 using HimLedger.Domain.Entities;
@@ -72,17 +73,39 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         var departmentIds = budgets.Items.Select(budget => budget.DepartmentId).ToArray();
         var spendingByDepartment = await context.Expenses
             .Where(expense => departmentIds.Contains(expense.DepartmentId)
-                && expense.Status == "Approved"
                 && expense.ExpenseDate >= periodStart
-                && expense.ExpenseDate < periodEnd)
+                && expense.ExpenseDate < periodEnd
+                && (expense.Status == ClaimStatuses.Submitted
+                    || expense.Status == ClaimStatuses.PendingApproval
+                    || expense.Status == ClaimStatuses.Resubmitted
+                    || expense.Status == ClaimStatuses.ChangesRequested
+                    || expense.Status == ClaimStatuses.Approved
+                    || expense.Status == ClaimStatuses.Reimbursed))
             .GroupBy(expense => expense.DepartmentId)
-            .Select(group => new { DepartmentId = group.Key, SpentAmount = group.Sum(expense => expense.Amount) })
-            .ToDictionaryAsync(group => group.DepartmentId, group => group.SpentAmount, cancellationToken);
+            .Select(group => new
+            {
+                DepartmentId = group.Key,
+                CommittedAmount = group.Where(expense =>
+                        expense.Status == ClaimStatuses.Submitted
+                        || expense.Status == ClaimStatuses.PendingApproval
+                        || expense.Status == ClaimStatuses.Resubmitted
+                        || expense.Status == ClaimStatuses.ChangesRequested)
+                    .Sum(expense => (decimal?)expense.Amount) ?? 0,
+                ApprovedAmount = group.Where(expense =>
+                        expense.Status == ClaimStatuses.Approved || expense.Status == ClaimStatuses.Reimbursed)
+                    .Sum(expense => (decimal?)expense.Amount) ?? 0,
+                ReimbursedAmount = group.Where(expense => expense.Status == ClaimStatuses.Reimbursed)
+                    .Sum(expense => (decimal?)expense.Amount) ?? 0
+            })
+            .ToDictionaryAsync(group => group.DepartmentId, cancellationToken);
 
         var result = new PagedResponse<BudgetListItem>(
             budgets.Items.Select(budget =>
             {
-                spendingByDepartment.TryGetValue(budget.DepartmentId, out var spentAmount);
+                spendingByDepartment.TryGetValue(budget.DepartmentId, out var spending);
+                var committedAmount = spending?.CommittedAmount ?? 0;
+                var approvedAmount = spending?.ApprovedAmount ?? 0;
+                var reimbursedAmount = spending?.ReimbursedAmount ?? 0;
                 return new BudgetListItem(
                     budget.BudgetId,
                     budget.DepartmentId,
@@ -90,8 +113,10 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
                     budget.FiscalYear,
                     budget.FiscalQuarter,
                     budget.AllocatedAmount,
-                    spentAmount,
-                    budget.AllocatedAmount - spentAmount,
+                    committedAmount,
+                    approvedAmount,
+                    reimbursedAmount,
+                    budget.AllocatedAmount - committedAmount - approvedAmount,
                     budget.RowVersion);
             }).ToArray(),
             budgets.Page,
@@ -124,6 +149,10 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
                 title: "Bad Request",
                 detail: "Department does not exist.");
         }
+
+        await using var transaction = context.Database.IsRelational()
+            ? await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
 
         var budget = await context.Budgets.SingleOrDefaultAsync(item =>
             item.DepartmentId == request.DepartmentId
@@ -163,17 +192,34 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
 
         var periodStart = new DateTime(request.FiscalYear, ((request.FiscalQuarter - 1) * 3) + 1, 1);
         var periodEnd = periodStart.AddMonths(3);
-        var spentAmount = await context.Expenses
+        var committedAmount = await context.Expenses
             .Where(expense => expense.DepartmentId == request.DepartmentId
-                && expense.Status == "Approved"
                 && expense.ExpenseDate >= periodStart
-                && expense.ExpenseDate < periodEnd)
+                && expense.ExpenseDate < periodEnd
+                && (expense.Status == ClaimStatuses.Submitted
+                    || expense.Status == ClaimStatuses.PendingApproval
+                    || expense.Status == ClaimStatuses.Resubmitted
+                    || expense.Status == ClaimStatuses.ChangesRequested))
             .SumAsync(expense => (decimal?)expense.Amount, cancellationToken) ?? 0;
-        budget.RemainingAmount = request.AllocatedAmount - spentAmount;
+        var approvedAmount = await context.Expenses
+            .Where(expense => expense.DepartmentId == request.DepartmentId
+                && expense.ExpenseDate >= periodStart
+                && expense.ExpenseDate < periodEnd
+                && (expense.Status == ClaimStatuses.Approved || expense.Status == ClaimStatuses.Reimbursed))
+            .SumAsync(expense => (decimal?)expense.Amount, cancellationToken) ?? 0;
+        if (committedAmount + approvedAmount > request.AllocatedAmount)
+        {
+            return Conflict("The allocation cannot be reduced below committed and approved spending.");
+        }
+        budget.RemainingAmount = request.AllocatedAmount - committedAmount - approvedAmount;
 
         try
         {
             await context.SaveChangesAsync(cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
         }
         catch (DbUpdateConcurrencyException)
         {
@@ -196,6 +242,7 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         }
     }
 
+    /// <summary>Budget allocation and dynamically calculated claim totals.</summary>
     public sealed record BudgetListItem(
         int BudgetId,
         int DepartmentId,
@@ -203,10 +250,13 @@ public class BudgetsController(ApplicationDbContext context) : ControllerBase
         int FiscalYear,
         int FiscalQuarter,
         decimal AllocatedAmount,
-        decimal SpentAmount,
+        decimal CommittedAmount,
+        decimal ApprovedAmount,
+        decimal ReimbursedAmount,
         decimal RemainingAmount,
         string RowVersion);
 
+    /// <summary>Payload for creating or updating a quarterly department allocation.</summary>
     public sealed record UpdateBudgetRequest
     {
         [Range(1, int.MaxValue)]
