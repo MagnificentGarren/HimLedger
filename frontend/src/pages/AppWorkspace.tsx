@@ -100,12 +100,14 @@ export const AppWorkspace = () => {
   const isAdmin = role === 'Admin';
   const isManager = role === 'Manager';
   const canReview = isAdmin || isManager;
+  const routeBase = location.pathname.startsWith('/workspace') ? '/workspace' : '/app';
   const activePage = location.pathname.replace(/\/$/, '').split('/').pop() ?? 'dashboard';
-  const isClaims = activePage === 'claims';
-  const isBudgets = activePage === 'budgets';
-  const isAudit = activePage === 'audit-logs';
-  const isDepartments = activePage === 'departments';
-  const isUsers = activePage === 'users';
+  const normalizedPage = activePage === 'overview' ? 'dashboard' : activePage;
+  const isClaims = normalizedPage === 'claims';
+  const isBudgets = normalizedPage === 'budgets';
+  const isAudit = normalizedPage === 'audit-logs';
+  const isDepartments = normalizedPage === 'departments';
+  const isUsers = normalizedPage === 'users' || normalizedPage === 'user-roles';
 
   useEffect(() => {
     const loadCoreData = async () => {
@@ -174,12 +176,12 @@ export const AppWorkspace = () => {
   const utilization = allocatedTotal > 0 ? Math.max(0, Math.min(((allocatedTotal - remainingTotal) / allocatedTotal) * 100, 100)) : 0;
 
   const navItems = [
-    { to: '/app/dashboard', label: 'Overview', icon: LayoutDashboard, visible: true },
-    { to: '/app/claims', label: role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims', icon: Receipt, visible: true },
-    { to: '/app/budgets', label: isManager ? 'Department budget' : 'Budgets', icon: WalletCards, visible: canReview },
-    { to: '/app/audit-logs', label: 'Audit logs', icon: ShieldCheck, visible: isAdmin },
-    { to: '/app/departments', label: 'Departments', icon: Building2, visible: isAdmin },
-    { to: '/app/users', label: 'User roles', icon: ShieldCheck, visible: isAdmin },
+    { to: `${routeBase}/dashboard`, label: 'Overview', icon: LayoutDashboard, visible: true },
+    { to: `${routeBase}/claims`, label: role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims', icon: Receipt, visible: true },
+    { to: `${routeBase}/budgets`, label: isManager ? 'Department budget' : 'Budgets', icon: WalletCards, visible: canReview },
+    { to: `${routeBase}/audit-logs`, label: 'Audit logs', icon: ShieldCheck, visible: isAdmin },
+    { to: `${routeBase}/departments`, label: 'Departments', icon: Building2, visible: isAdmin },
+    { to: `${routeBase}/user-roles`, label: 'User roles', icon: ShieldCheck, visible: isAdmin },
   ].filter((item) => item.visible);
 
   const handleLogout = () => { logout(); navigate('/login'); };
@@ -288,7 +290,7 @@ export const AppWorkspace = () => {
     URL.revokeObjectURL(url);
   };
 
-  if (!['dashboard', 'claims', 'budgets', 'audit-logs', 'departments', 'users'].includes(activePage)) return <Navigate to="/app/dashboard" replace />;
+  if (!['dashboard', 'overview', 'claims', 'budgets', 'audit-logs', 'departments', 'users', 'user-roles'].includes(normalizedPage)) return <Navigate to="/app/dashboard" replace />;
   if ((isBudgets && !canReview) || ((isAudit || isDepartments || isUsers) && !isAdmin)) return <Navigate to="/app/dashboard" replace />;
 
   const pageTitle = isClaims ? (role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims') : isBudgets ? 'Budget allocations' : isAudit ? 'Audit logs' : isDepartments ? 'Departments' : isUsers ? 'User roles' : 'Overview';
@@ -297,11 +299,11 @@ export const AppWorkspace = () => {
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
-        <Link className="app-brand" to="/app/dashboard" aria-label="HimLedger overview"><span className="app-brand-mark">H</span><span>HimLedger</span></Link>
+        <Link className="app-brand" to={`${routeBase}/dashboard`} aria-label="HimLedger overview"><span className="app-brand-mark">H</span><span>HimLedger</span></Link>
         <div className="app-workspace-tag"><span className="app-online-dot" /> Finance workspace</div>
         <nav className="app-nav" aria-label="Workspace navigation">
           <span className="app-nav-label">WORKSPACE</span>
-          {navItems.map(({ to, label, icon: Icon }) => <Link key={to} to={to} onClick={() => document.querySelector('.app-sidebar')?.classList.remove('is-open')} className={`app-nav-link ${activePage === to.split('/').pop() ? 'is-active' : ''}`}><Icon size={17} /><span>{label}</span></Link>)}
+          {navItems.map(({ to, label, icon: Icon }) => <Link key={to} to={to} onClick={() => document.querySelector('.app-sidebar')?.classList.remove('is-open')} className={`app-nav-link ${normalizedPage === to.split('/').pop() || (normalizedPage === 'users' && to.endsWith('/user-roles')) ? 'is-active' : ''}`}><Icon size={17} /><span>{label}</span></Link>)}
         </nav>
         <div className="app-sidebar-bottom"><div className="app-secure-note"><ShieldCheck size={16} /><span>Protected workspace</span></div><span>HimLedger · {new Date().getFullYear()}</span></div>
       </aside>
@@ -310,7 +312,7 @@ export const AppWorkspace = () => {
         <header className="app-topbar">
           <label className="app-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search claims, people, departments" aria-label="Search workspace" /></label>
           <div className="app-top-actions">
-            <button type="button" className="app-icon-button app-notifications" title={`${pendingCount} pending claims`} aria-label={`${pendingCount} pending claims`} onClick={() => navigate('/app/claims')}><Bell size={18} />{pendingCount > 0 && <span>{pendingCount > 9 ? '9+' : pendingCount}</span>}</button>
+            <button type="button" className="app-icon-button app-notifications" title={`${pendingCount} pending claims`} aria-label={`${pendingCount} pending claims`} onClick={() => navigate(`${routeBase}/claims`)}><Bell size={18} />{pendingCount > 0 && <span>{pendingCount > 9 ? '9+' : pendingCount}</span>}</button>
             <div className="app-profile"><span className="app-avatar">{`${user?.firstName?.[0] ?? 'U'}${user?.lastName?.[0] ?? ''}`}</span><span className="app-profile-copy"><strong>{user?.firstName} {user?.lastName}</strong><small>{role}</small></span><ChevronDown size={14} /></div>
             <button type="button" className="app-signout" onClick={handleLogout} title="Sign out"><LogOut size={16} /><span>Sign out</span></button>
             <button type="button" className="app-icon-button app-mobile-menu" aria-label="Open navigation" onClick={() => document.querySelector('.app-sidebar')?.classList.toggle('is-open')}><Menu size={19} /></button>
@@ -325,7 +327,7 @@ export const AppWorkspace = () => {
           </div>
           {pageError && <div className="app-error" role="alert">{pageError}<button type="button" onClick={() => setPageError('')} aria-label="Dismiss error"><X size={15} /></button></div>}
 
-          {activePage === 'dashboard' && <>
+          {normalizedPage === 'dashboard' && <>
             <section className="app-kpis" aria-label="Financial overview">
               <article className="app-kpi app-kpi--featured"><span className="app-kpi-icon"><CircleDollarSign size={18} /></span><span className="app-kpi-label">Total expense volume</span><strong>{money(totalExpenses)}</strong><small>All recorded claims</small></article>
               <article className="app-kpi"><span className="app-kpi-icon app-kpi-icon--amber"><Clock3 size={18} /></span><span className="app-kpi-label">Pending decisions</span><strong>{pendingCount}</strong><small>Awaiting manager sign-off</small></article>
@@ -333,10 +335,10 @@ export const AppWorkspace = () => {
               <article className="app-kpi"><span className="app-kpi-icon app-kpi-icon--blue"><WalletCards size={18} /></span><span className="app-kpi-label">Budget remaining</span><strong>{money(remainingTotal)}</strong><small>{money(allocatedTotal)} allocated · {utilization.toFixed(0)}% utilized</small></article>
             </section>
             <div className="app-overview-grid">
-              <section className="app-panel app-recent-panel"><div className="app-panel-heading"><div><span className="app-section-kicker">LATEST ACTIVITY</span><h2>Recent claims</h2></div><Link to="/app/claims" className="app-text-link">View all <ChevronDown size={14} /></Link></div>
+              <section className="app-panel app-recent-panel"><div className="app-panel-heading"><div><span className="app-section-kicker">LATEST ACTIVITY</span><h2>Recent claims</h2></div><Link to={`${routeBase}/claims`} className="app-text-link">View all <ChevronDown size={14} /></Link></div>
                 <div className="app-recent-list">{loading ? <div className="app-loading">Loading claims...</div> : expenses.slice(0, 6).map((expense) => <div className="app-recent-row" key={expense.expenseId}><span className="app-receipt-icon"><Receipt size={17} /></span><span className="app-recent-details"><strong>{expense.title}</strong><small>{expense.userFullName} · {expense.departmentName}</small></span><span className="app-recent-amount"><strong>{money(expense.amount)}</strong><small>{dateLabel(expense.expenseDate)}</small></span><span className={`app-status app-status--${expense.status.toLowerCase()}`}>{expense.status}</span></div>)}{!loading && expenses.length === 0 && <div className="app-empty">No claims have been submitted yet.</div>}</div>
               </section>
-              <section className="app-panel app-budget-panel"><div className="app-panel-heading"><div><span className="app-section-kicker">FISCAL PERIOD</span><h2>Department budgets</h2></div><Link to="/app/budgets" className="app-icon-link" aria-label="View budgets"><ChevronDown size={17} /></Link></div>
+              <section className="app-panel app-budget-panel"><div className="app-panel-heading"><div><span className="app-section-kicker">FISCAL PERIOD</span><h2>Department budgets</h2></div><Link to={`${routeBase}/budgets`} className="app-icon-link" aria-label="View budgets"><ChevronDown size={17} /></Link></div>
                 <div className="app-mini-budget-list">{budgets.slice(0, 5).map((budget) => <BudgetMeter key={budget.budgetId} budget={budget} compact />)}{budgets.length === 0 && <div className="app-empty">No budgets configured for this quarter.</div>}</div><div className="app-period-caption"><CalendarDays size={14} /> FY {year} · Q{quarter}</div>
               </section>
             </div>
