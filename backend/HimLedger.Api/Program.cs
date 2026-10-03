@@ -210,10 +210,10 @@ if (app.Environment.IsDevelopment()
 {
     await using var scope = app.Services.CreateAsyncScope();
     var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-    var addedCount = await DevelopmentTestAccountSeeder.SeedAsync(context);
+    var changedCount = await DevelopmentTestAccountSeeder.SeedAsync(context);
     app.Logger.LogInformation(
-        "Development test account seeding complete; {AddedCount} account(s) added.",
-        addedCount);
+        "Development test account seeding complete; {ChangedCount} account(s) added or had credentials reset.",
+        changedCount);
 }
 
 // Configure the HTTP request pipeline.

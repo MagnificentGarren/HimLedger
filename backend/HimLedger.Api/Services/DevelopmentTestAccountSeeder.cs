@@ -7,14 +7,14 @@ namespace HimLedger.Api.Services;
 
 internal static class DevelopmentTestAccountSeeder
 {
-    public const string Password = "Test123!";
+    public const string Password = "test1234";
 
     private static readonly (string Email, string FirstName, string LastName, string RoleName)[] Accounts =
     [
-        ("admin.test@himledger.local", "Test", "Admin", "Admin"),
-        ("manager.test@himledger.local", "Test", "Manager", "Manager"),
-        ("employee.test@himledger.local", "Test", "Employee", "Employee"),
-        ("finance.test@himledger.local", "Test", "Finance", "Finance")
+        ("admin@himledger.test", "Test", "Admin", "Admin"),
+        ("manager@himledger.test", "Test", "Manager", "Manager"),
+        ("employee@himledger.test", "Test", "Employee", "Employee"),
+        ("finance@himledger.test", "Test", "Finance", "Finance")
     ];
 
     public static async Task<int> SeedAsync(
@@ -48,7 +48,7 @@ internal static class DevelopmentTestAccountSeeder
             .Select(department => (int?)department.DepartmentId)
             .FirstOrDefaultAsync(cancellationToken);
         var passwordHasher = new PasswordHasher<User>();
-        var addedCount = 0;
+        var changedCount = 0;
 
         foreach (var account in Accounts)
         {
@@ -59,8 +59,19 @@ internal static class DevelopmentTestAccountSeeder
                     $"Cannot seed development test accounts: role '{account.RoleName}' requires a department.")
                 : null;
 
-            if (await context.Users.AnyAsync(user => user.Email == account.Email, cancellationToken))
+            var existingUser = await context.Users
+                .SingleOrDefaultAsync(user => user.Email == account.Email, cancellationToken);
+            if (existingUser is not null)
             {
+                if (passwordHasher.VerifyHashedPassword(
+                        existingUser,
+                        existingUser.PasswordHash,
+                        Password) == PasswordVerificationResult.Failed)
+                {
+                    existingUser.PasswordHash = passwordHasher.HashPassword(existingUser, Password);
+                    changedCount++;
+                }
+
                 continue;
             }
 
@@ -74,14 +85,14 @@ internal static class DevelopmentTestAccountSeeder
             };
             user.PasswordHash = passwordHasher.HashPassword(user, Password);
             context.Users.Add(user);
-            addedCount++;
+            changedCount++;
         }
 
-        if (addedCount > 0)
+        if (changedCount > 0)
         {
             await context.SaveChangesAsync(cancellationToken);
         }
 
-        return addedCount;
+        return changedCount;
     }
 }

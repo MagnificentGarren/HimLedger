@@ -73,20 +73,59 @@ is retained, and the last active Admin account cannot be deactivated.
 ## Local role-testing accounts
 
 The API's Development launch profiles create any missing role-testing accounts
-after the database migrations have been applied. Password login and this seeding
-are available only in the Development environment; do not reuse these credentials
-outside local testing.
+after the database migrations have been applied. On startup, seeding also
+resets these accounts to the password below if their password has changed.
+Password login and this seeding are available only in the Development
+environment; never reuse these credentials outside local testing.
 
 | Role | Email (username) | Password |
 | --- | --- | --- |
-| Admin | `admin.test@himledger.local` | `Test123!` |
-| Manager | `manager.test@himledger.local` | `Test123!` |
-| Employee | `employee.test@himledger.local` | `Test123!` |
-| Finance | `finance.test@himledger.local` | `Test123!` |
+| Admin | `admin@himledger.test` | `test1234` |
+| Manager | `manager@himledger.test` | `test1234` |
+| Employee | `employee@himledger.test` | `test1234` |
+| Finance | `finance@himledger.test` | `test1234` |
 
 Manager and Employee accounts are assigned to the first configured department.
-If an account already exists, startup leaves it unchanged. These accounts are
-not seeded when the API runs outside Development.
+These accounts are not seeded when the API runs outside Development.
 
-`HimLedger.Api.http` contains sample requests for the lifecycle and reconciliation
-routes.
+### Fresh local test run
+
+The checked-in Development connection targets `localhost` / `HimLedgerDB`.
+Before running the destructive reset below, verify that
+`ConnectionStrings:DefaultConnection` still points to a local disposable
+database, not a shared or production database.
+
+From the `backend` directory, rebuild that database from the current migrations:
+
+```powershell
+dotnet ef database drop --project HimLedger.Infrastructure --startup-project HimLedger.Api --force
+dotnet ef database update --project HimLedger.Infrastructure --startup-project HimLedger.Api
+```
+
+Then start the API with the `http` launch profile and start the frontend in a
+second terminal:
+
+```powershell
+dotnet run --project HimLedger.Api --launch-profile http
+```
+
+```powershell
+cd ..\frontend
+npm run dev
+```
+
+Open `http://localhost:5173/login` and use any role account above. A workflow
+smoke test is:
+
+1. Sign in as Admin and allocate a budget for Logistics & Operations for the
+   current fiscal quarter.
+2. Sign in as Employee and create and submit an expense claim in that department.
+3. Sign in as Manager and review the pending claim; approve it or request
+   changes, then verify the employee can see the updated status.
+4. Sign in as Finance and mark the approved claim as reimbursed.
+5. Sign in as Admin and verify user/department administration and audit history.
+6. Check `http://localhost:5228/healthz` and `http://localhost:5228/ready`;
+   both should return `Healthy`.
+
+`HimLedger.Api.http` contains sample requests for the lifecycle and
+reconciliation routes.
