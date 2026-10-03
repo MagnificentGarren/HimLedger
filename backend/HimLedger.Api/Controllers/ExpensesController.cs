@@ -225,9 +225,13 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
         }
         context.Entry(expense).Property(item => item.RowVersion).OriginalValue = rowVersion;
 
-        if (request.Status == ClaimStatuses.Approved && !await IsWithinBudgetAsync(expense, cancellationToken))
+        if (request.Status == ClaimStatuses.Approved
+            && await GetBudgetApprovalIssueAsync(expense, cancellationToken) is { } budgetIssue)
         {
-            return Conflict("Approving this claim would exceed the available budget.");
+            return Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Budget approval unavailable",
+                detail: budgetIssue);
         }
 
         var previousStatus = expense.Status;
@@ -247,6 +251,31 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
             Comments = request.Comments
         });
         AddOutboxMessage(id, request.Status, reviewerId, request.Comments);
+        var employeeMessage = request.Status switch
+        {
+            ClaimStatuses.Approved => "Your claim was accepted.",
+            ClaimStatuses.Rejected => "Your claim was rejected.",
+            _ => "Your claim needs changes before it can be approved."
+        };
+        AddUserNotifications(
+            [expense.UserId],
+            id,
+            $"Claim {request.Status.ToLowerInvariant()}",
+            $"{employeeMessage}{(string.IsNullOrWhiteSpace(request.Comments) ? string.Empty : $" Reviewer comment: {request.Comments.Trim()}")}");
+        if (request.Status == ClaimStatuses.Approved)
+        {
+            var financeUserIds = await context.Users
+                .Where(user => user.IsActive
+                    && user.Role.Name == "Finance"
+                    && (user.DepartmentId == null || user.DepartmentId == expense.DepartmentId))
+                .Select(user => user.UserId)
+                .ToListAsync(cancellationToken);
+            AddUserNotifications(
+                financeUserIds,
+                id,
+                "Claim ready for reimbursement",
+                $"Claim HL-{id:D5} ({expense.Title}) was approved and is ready for Finance to review.");
+        }
 
         try
         {
@@ -567,6 +596,27 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
             context.ClaimStatusHistory.Add(NewHistory(
                 expenseId, actorId, submittedStatus, ClaimStatuses.PendingApproval, "Routed for approval", notes));
             AddOutboxMessage(expenseId, ClaimStatuses.PendingApproval, actorId, notes);
+            var recipients = await context.Users
+                .Where(user => user.IsActive
+                    && (user.Role.Name == "Admin"
+                        || (user.Role.Name == "Finance"
+                            && (user.DepartmentId == null || user.DepartmentId == expense.DepartmentId))
+                        || (user.Role.Name == "Manager" && user.DepartmentId == expense.DepartmentId)))
+                .Select(user => new { user.UserId, Role = user.Role.Name })
+                .ToListAsync(cancellationToken);
+            var reviewRecipients = recipients
+                .Where(item => item.Role is "Admin" or "Manager")
+                .Select(item => item.UserId);
+            AddUserNotifications(
+                reviewRecipients,
+                expenseId,
+                "Claim submitted for approval",
+                $"Claim HL-{expenseId:D5} ({expense.Title}) is awaiting review. Check its budget status before deciding.");
+            AddUserNotifications(
+                recipients.Where(item => item.Role == "Finance").Select(item => item.UserId),
+                expenseId,
+                "Claim submitted for budget review",
+                $"Claim HL-{expenseId:D5} ({expense.Title}) was submitted. Review the budget status and coordinate an allocation if needed.");
         }
 
         await context.SaveChangesAsync(cancellationToken);
@@ -626,7 +676,7 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
             cancellationToken);
     }
 
-    private async Task<bool> IsWithinBudgetAsync(Expense expense, CancellationToken cancellationToken)
+    private async Task<string?> GetBudgetApprovalIssueAsync(Expense expense, CancellationToken cancellationToken)
     {
         var fiscalYear = expense.ExpenseDate.Year;
         var fiscalQuarter = ((expense.ExpenseDate.Month - 1) / 3) + 1;
@@ -638,7 +688,11 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
             cancellationToken);
         if (budget is null)
         {
-            return false;
+            var departmentName = await context.Departments
+                .Where(item => item.DepartmentId == expense.DepartmentId)
+                .Select(item => item.Name)
+                .SingleAsync(cancellationToken);
+            return $"No budget is allocated to {departmentName} for FY {fiscalYear}, Q{fiscalQuarter}. Ask Finance or an administrator to allocate a budget, then retry approval.";
         }
 
         var committedOrApproved = await context.Expenses
@@ -653,7 +707,9 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
                     || item.Status == ClaimStatuses.Resubmitted
                     || item.Status == ClaimStatuses.ChangesRequested))
             .SumAsync(item => (decimal?)item.Amount, cancellationToken) ?? 0;
-        return committedOrApproved + expense.Amount <= budget.AllocatedAmount;
+        return committedOrApproved + expense.Amount <= budget.AllocatedAmount
+            ? null
+            : $"This claim would exceed the available budget for FY {fiscalYear}, Q{fiscalQuarter}. Ask Finance or an administrator to review the allocation or claim amount.";
     }
 
     private Task<bool> LockBudgetPeriodAsync(
@@ -733,6 +789,20 @@ public class ExpensesController(ApplicationDbContext context, IReceiptStorage re
             EventType = "ClaimStatusChanged",
             Payload = JsonSerializer.Serialize(new { expenseId, status, actorId, notes })
         });
+    }
+
+    private void AddUserNotifications(IEnumerable<int> recipientIds, int expenseId, string title, string message)
+    {
+        foreach (var recipientId in recipientIds.Distinct())
+        {
+            context.UserNotifications.Add(new UserNotification
+            {
+                UserId = recipientId,
+                ExpenseId = expenseId,
+                Title = title,
+                Message = message
+            });
+        }
     }
 
     private static string Csv(string value, bool protectSpreadsheetFormula = false)

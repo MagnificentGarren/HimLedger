@@ -53,9 +53,9 @@ internal static class InternalIdentityClaims
                 .SingleOrDefaultAsync(item => item.UserId == userId, context.HttpContext.RequestAborted);
         }
 
-        if (user is null)
+        if (user is null || !user.IsActive)
         {
-            context.Fail("The external identity is not assigned to an internal user account.");
+            context.Fail("The identity is not assigned to an active internal user account.");
             return;
         }
 

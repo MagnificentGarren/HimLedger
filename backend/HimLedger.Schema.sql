@@ -44,6 +44,7 @@ CREATE TABLE Users (
     EntraObjectId NVARCHAR(36) NULL,
     RoleId INT NOT NULL,
     DepartmentId INT NULL,
+    IsActive BIT NOT NULL DEFAULT 1,
     CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
     FOREIGN KEY (RoleId) REFERENCES Roles(RoleId),
     FOREIGN KEY (DepartmentId) REFERENCES Departments(DepartmentId)
@@ -178,6 +179,28 @@ CREATE TABLE NotificationOutboxMessages (
     LastError NVARCHAR(2000) NULL
 );
 
+CREATE TABLE UserNotifications (
+    UserNotificationId BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserId INT NOT NULL,
+    ExpenseId INT NULL,
+    Title NVARCHAR(120) NOT NULL,
+    Message NVARCHAR(700) NOT NULL,
+    CreatedAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    ReadAt DATETIMEOFFSET NULL,
+    FOREIGN KEY (UserId) REFERENCES Users(UserId),
+    FOREIGN KEY (ExpenseId) REFERENCES Expenses(ExpenseId)
+);
+
+CREATE TABLE UserAccessAuditLogs (
+    UserAccessAuditLogId BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserId INT NOT NULL,
+    ActorUserId INT NOT NULL,
+    IsActive BIT NOT NULL,
+    OccurredAt DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+    FOREIGN KEY (UserId) REFERENCES Users(UserId),
+    FOREIGN KEY (ActorUserId) REFERENCES Users(UserId)
+);
+
 -- Indexing for performance
 CREATE INDEX IX_Expenses_UserId ON Expenses(UserId);
 CREATE INDEX IX_Expenses_CategoryId ON Expenses(CategoryId);
@@ -188,3 +211,13 @@ CREATE INDEX IX_ApprovalDelegations_DepartmentId_DelegateUserId_StartsAt_EndsAt
     ON ApprovalDelegations(DepartmentId, DelegateUserId, StartsAt, EndsAt);
 CREATE INDEX IX_NotificationOutboxMessages_DispatchedAt_NextAttemptAt_LockedUntil
     ON NotificationOutboxMessages(DispatchedAt, NextAttemptAt, LockedUntil);
+CREATE INDEX IX_UserNotifications_UserId_ReadAt_CreatedAt
+    ON UserNotifications(UserId, ReadAt, CreatedAt);
+CREATE INDEX IX_UserNotifications_ExpenseId
+    ON UserNotifications(ExpenseId);
+CREATE INDEX IX_UserAccessAuditLogs_OccurredAt_UserAccessAuditLogId
+    ON UserAccessAuditLogs(OccurredAt, UserAccessAuditLogId);
+CREATE INDEX IX_UserAccessAuditLogs_UserId
+    ON UserAccessAuditLogs(UserId);
+CREATE INDEX IX_UserAccessAuditLogs_ActorUserId
+    ON UserAccessAuditLogs(ActorUserId);

@@ -37,6 +37,22 @@ Receipt uploads accept PDF, JPEG, and PNG files up to 10 MiB. The API checks
 file signatures, stores content in Azure Blob Storage, stores only blob metadata
 in SQL Server, and issues read-only SAS URLs that expire after five minutes.
 
+## Phase 6 operations
+
+`GET /healthz` is the dependency-independent liveness probe. `GET /ready`
+checks database connectivity and returns `503` if SQL Server is unavailable;
+`GET /health` remains a readiness alias for compatibility. Logs use structured
+JSON output, and Application Insights request/dependency/exception telemetry is
+enabled when `ApplicationInsights:ConnectionString` is configured.
+
+The parameterized Azure resources and deployment guidance are in
+[`../infra/README.md`](../infra/README.md). The recovery, rollback, telemetry,
+and staging-rehearsal procedures are in
+[`OPERATIONS.md`](OPERATIONS.md). Deploy `dev`, `staging`, and `prod` into
+separate resource groups. Do not treat infrastructure deployment as proof of
+production readiness: complete and record the staging recovery/rollback
+rehearsal first.
+
 ## Database
 
 Apply the EF Core migrations from the backend directory with:
@@ -44,6 +60,33 @@ Apply the EF Core migrations from the backend directory with:
 ```powershell
 dotnet ef database update --project HimLedger.Infrastructure --startup-project HimLedger.Api
 ```
+
+For a fresh SQL Server database created from scratch, `HimLedger.Schema.sql`
+includes the same account activation, in-app notification, and account-access
+audit tables. Use EF migrations to upgrade an existing database.
+
+The latest migration adds per-account notifications, account activation state,
+and an audit trail for account access changes. Admins should deactivate accounts
+from the User roles workspace instead of deleting them; claim and audit history
+is retained, and the last active Admin account cannot be deactivated.
+
+## Local role-testing accounts
+
+The API's Development launch profiles create any missing role-testing accounts
+after the database migrations have been applied. Password login and this seeding
+are available only in the Development environment; do not reuse these credentials
+outside local testing.
+
+| Role | Email (username) | Password |
+| --- | --- | --- |
+| Admin | `admin.test@himledger.local` | `Test123!` |
+| Manager | `manager.test@himledger.local` | `Test123!` |
+| Employee | `employee.test@himledger.local` | `Test123!` |
+| Finance | `finance.test@himledger.local` | `Test123!` |
+
+Manager and Employee accounts are assigned to the first configured department.
+If an account already exists, startup leaves it unchanged. These accounts are
+not seeded when the API runs outside Development.
 
 `HimLedger.Api.http` contains sample requests for the lifecycle and reconciliation
 routes.

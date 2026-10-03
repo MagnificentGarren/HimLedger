@@ -1,5 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
+using System.Data;
+using HimLedger.Domain.Entities;
 using HimLedger.Api.Models;
 using HimLedger.Infrastructure;
 using Microsoft.Data.SqlClient;
@@ -34,6 +36,7 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
                 RoleName = user.Role.Name,
                 user.DepartmentId,
                 DepartmentName = user.Department == null ? null : user.Department.Name,
+                user.IsActive,
                 user.EntraTenantId,
                 user.EntraObjectId
             })
@@ -120,6 +123,9 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
                 detail: "You cannot change your own role.");
         }
 
+        await using var transaction = context.Database.IsRelational()
+            ? await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
         var user = await context.Users
             .Include(item => item.Role)
             .SingleOrDefaultAsync(item => item.UserId == id, cancellationToken);
@@ -144,8 +150,8 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
                 detail: "Assign a department before assigning the Employee or Manager role.");
         }
 
-        if (user.Role.Name == "Admin" && role.Name != "Admin"
-            && await context.Users.CountAsync(item => item.Role.Name == "Admin", cancellationToken) <= 1)
+        if (user.IsActive && user.Role.Name == "Admin" && role.Name != "Admin"
+            && await context.Users.CountAsync(item => item.IsActive && item.Role.Name == "Admin", cancellationToken) <= 1)
         {
             return Problem(
                 statusCode: StatusCodes.Status409Conflict,
@@ -155,6 +161,10 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
 
         user.RoleId = role.RoleId;
         await context.SaveChangesAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
         return NoContent();
     }
 
@@ -189,6 +199,65 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
 
         user.DepartmentId = request.DepartmentId;
         await context.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpPut("{id:int}/active")]
+    public async Task<IActionResult> UpdateUserActiveStatus(
+        int id,
+        [FromBody] UpdateUserActiveStatusRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!int.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out var adminId))
+        {
+            return Unauthorized();
+        }
+
+        await using var transaction = context.Database.IsRelational()
+            ? await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+        var user = await context.Users
+            .Include(item => item.Role)
+            .SingleOrDefaultAsync(item => item.UserId == id, cancellationToken);
+        if (user is null)
+        {
+            return NotFound();
+        }
+        if (!request.IsActive && adminId == id)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Bad Request",
+                detail: "You cannot deactivate your own account.");
+        }
+        if (!request.IsActive
+            && user.IsActive
+            && user.Role.Name == "Admin"
+            && await context.Users.CountAsync(
+                item => item.IsActive && item.Role.Name == "Admin" && item.UserId != id,
+                cancellationToken) == 0)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Conflict",
+                detail: "The last active Admin account cannot be deactivated.");
+        }
+
+        if (user.IsActive != request.IsActive)
+        {
+            user.IsActive = request.IsActive;
+            context.UserAccessAuditLogs.Add(new UserAccessAuditLog
+            {
+                UserId = user.UserId,
+                ActorUserId = adminId,
+                IsActive = request.IsActive
+            });
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
         return NoContent();
     }
 
@@ -275,6 +344,11 @@ public class UsersController(ApplicationDbContext context) : ControllerBase
     {
         [Range(1, int.MaxValue)]
         public int? DepartmentId { get; init; }
+    }
+
+    public sealed record UpdateUserActiveStatusRequest
+    {
+        public bool IsActive { get; init; }
     }
 
     public sealed record UpdateEntraIdentityRequest

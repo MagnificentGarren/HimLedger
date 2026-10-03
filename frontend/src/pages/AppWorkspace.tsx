@@ -1,8 +1,9 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { isAxiosError } from 'axios';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowDownToLine, BadgeCheck, Bell, Building2, CalendarDays,
@@ -12,6 +13,7 @@ import {
 import api, { getAllPages } from '../api/axios';
 import type { CreateExpenseDto, Expense as ApiExpense, UpdateBudgetRequest, UpdateExpenseStatusDto } from '../api/models';
 import { useAuth } from '../context/auth';
+import { BrandMark } from './PublicSite';
 
 type Expense = ApiExpense;
 
@@ -28,8 +30,21 @@ interface ManagedUser {
   departmentName: string | null;
   entraTenantId: string | null;
   entraObjectId: string | null;
+  isActive: boolean;
 }
 interface UserRole { roleId: number; name: string }
+interface WorkspaceNotification {
+  userNotificationId: number;
+  expenseId: number | null;
+  title: string;
+  message: string;
+  createdAt: string;
+  readAt: string | null;
+}
+interface NotificationList {
+  unreadCount: number;
+  notifications: WorkspaceNotification[];
+}
 interface Budget {
   budgetId: number;
   departmentId: number;
@@ -51,6 +66,14 @@ interface AuditRecord {
   action: string;
   reviewedBy: string;
   comments: string | null;
+}
+interface UserAccessAuditRecord {
+  userAccessAuditLogId: number;
+  occurredAt: string;
+  user: string;
+  email: string;
+  actor: string;
+  isActive: boolean;
 }
 
 const money = (value: number) => `R ${value.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -95,6 +118,7 @@ export const AppWorkspace = () => {
   const [showBudgetForm, setShowBudgetForm] = useState(false);
   const [showDepartmentForm, setShowDepartmentForm] = useState(false);
   const [showUserForm, setShowUserForm] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
   const [identityTarget, setIdentityTarget] = useState<ManagedUser | null>(null);
   const [reviewTarget, setReviewTarget] = useState<Expense | null>(null);
@@ -114,6 +138,9 @@ export const AppWorkspace = () => {
       description: '',
     },
   });
+  const selectedClaimDepartment = useWatch({ control: claimForm.control, name: 'departmentId' });
+  const selectedClaimDate = useWatch({ control: claimForm.control, name: 'expenseDate' });
+  const selectedClaimAmount = useWatch({ control: claimForm.control, name: 'amount' });
   const [allocation, setAllocation] = useState({ departmentId: '', amount: '' });
   const [departmentForm, setDepartmentForm] = useState({ name: '', code: '' });
   const [managedUserForm, setManagedUserForm] = useState({ firstName: '', lastName: '', email: '', roleId: '', departmentId: '' });
@@ -162,12 +189,53 @@ export const AppWorkspace = () => {
     enabled: isBudgets || activePage === 'dashboard',
   });
   const budgets = budgetsQuery.data ?? [];
+  const reviewBudgetQuery = useQuery({
+    queryKey: ['review-budget', user?.userId, reviewTarget?.expenseId],
+    queryFn: async () => {
+      if (!reviewTarget) throw new Error('A claim must be selected to load its budget.');
+      const date = new Date(reviewTarget.expenseDate);
+      return getAllPages<Budget>('/Budgets', {
+        fiscalYear: date.getFullYear(),
+        fiscalQuarter: Math.floor(date.getMonth() / 3) + 1,
+      });
+    },
+    enabled: reviewTarget !== null,
+  });
+  const reviewBudget = reviewBudgetQuery.data?.find((item) => item.departmentId === reviewTarget?.departmentId);
+  const claimBudgetQuery = useQuery({
+    queryKey: ['claim-budget-preview', user?.userId, selectedClaimDepartment, selectedClaimDate],
+    queryFn: async () => {
+      if (!selectedClaimDepartment || !selectedClaimDate) {
+        throw new Error('A department and expense date are required to check the budget.');
+      }
+      const date = new Date(`${selectedClaimDate}T00:00:00`);
+      return getAllPages<Budget>('/Budgets', {
+        fiscalYear: date.getFullYear(),
+        fiscalQuarter: Math.floor(date.getMonth() / 3) + 1,
+      });
+    },
+    enabled: showClaimForm && Boolean(selectedClaimDepartment) && Boolean(selectedClaimDate),
+  });
+  const claimBudget = claimBudgetQuery.data?.find((item) => item.departmentId === Number(selectedClaimDepartment));
+  const notificationsQuery = useQuery({
+    queryKey: ['notifications', user?.userId],
+    queryFn: async () => (await api.get<NotificationList>('/Notifications')).data,
+    refetchInterval: 30_000,
+  });
+  const notificationItems = notificationsQuery.data?.notifications ?? [];
+  const unreadNotificationCount = notificationsQuery.data?.unreadCount ?? 0;
   const auditQuery = useQuery({
     queryKey: ['audit-records', user?.userId],
     queryFn: () => getAllPages<AuditRecord>('/AuditLogs'),
     enabled: isAudit && canSeeAudit,
   });
   const auditRecords = auditQuery.data ?? [];
+  const userAccessAuditQuery = useQuery({
+    queryKey: ['user-access-audit', user?.userId],
+    queryFn: () => getAllPages<UserAccessAuditRecord>('/AuditLogs/user-access'),
+    enabled: isAudit && isAdmin,
+  });
+  const userAccessAuditRecords = userAccessAuditQuery.data ?? [];
   const usersQuery = useQuery({
     queryKey: ['managed-users', user?.userId],
     queryFn: async () => {
@@ -189,6 +257,8 @@ export const AppWorkspace = () => {
       ? 'Budget data could not be loaded for this period.'
       : auditQuery.error
         ? 'Audit records could not be loaded.'
+        : userAccessAuditQuery.error
+          ? 'Account access history could not be loaded.'
         : usersQuery.error
           ? 'User role data could not be loaded.'
           : '';
@@ -219,6 +289,53 @@ export const AppWorkspace = () => {
   ].filter((item) => item.visible);
 
   const handleLogout = () => { logout(); navigate('/login'); };
+
+  const openNotification = async (notification: WorkspaceNotification) => {
+    try {
+      if (!notification.readAt) {
+        await api.post(`/Notifications/${notification.userNotificationId}/read`);
+        await queryClient.invalidateQueries({ queryKey: ['notifications', user?.userId] });
+      }
+      setShowNotifications(false);
+      navigate(notification.expenseId
+        ? `${routeBase}/claims#claim-${notification.expenseId}`
+        : `${routeBase}/claims`);
+    } catch (error) {
+      console.error('Failed to open notification', error);
+      setPageError('This notification could not be opened. Refresh and try again.');
+    }
+  };
+
+  const markAllNotificationsRead = async () => {
+    try {
+      await api.post('/Notifications/read-all');
+      await queryClient.invalidateQueries({ queryKey: ['notifications', user?.userId] });
+    } catch (error) {
+      console.error('Failed to mark notifications as read', error);
+      setPageError('Notifications could not be marked as read.');
+    }
+  };
+
+  const setUserActive = async (managedUser: ManagedUser) => {
+    const nextActiveState = !managedUser.isActive;
+    const action = nextActiveState ? 'reactivate' : 'deactivate';
+    const explanation = nextActiveState
+      ? `Reactivate access for ${managedUser.firstName} ${managedUser.lastName}?`
+      : `Deactivate access for ${managedUser.firstName} ${managedUser.lastName}? Their existing claims and audit history will be preserved.`;
+    if (!window.confirm(explanation)) return;
+
+    setBusy(true);
+    setPageError('');
+    try {
+      await api.put(`/Users/${managedUser.userId}/active`, { isActive: nextActiveState });
+      await queryClient.invalidateQueries({ queryKey: ['managed-users', user?.userId] });
+      await queryClient.invalidateQueries({ queryKey: ['user-access-audit', user?.userId] });
+    } catch (error) {
+      console.error(`Failed to ${action} user account`, error);
+      const detail = isAxiosError<{ detail?: string }>(error) ? error.response?.data?.detail : undefined;
+      setPageError(detail ?? `The account could not be ${action}d.`);
+    } finally { setBusy(false); }
+  };
 
   const handleClaimSubmit = async (values: ClaimFormValues) => {
     setBusy(true);
@@ -283,7 +400,11 @@ export const AppWorkspace = () => {
       setReviewComment('');
     } catch (error) {
       console.error('Failed to update claim status', error);
-      setFormError('The decision could not be saved. Try again.');
+      const detail = isAxiosError<{ detail?: string }>(error) ? error.response?.data?.detail : undefined;
+      const responseText = isAxiosError(error) && typeof error.response?.data === 'string'
+        ? error.response.data
+        : undefined;
+      setFormError(detail ?? responseText ?? 'The decision could not be saved. Refresh the claim and try again.');
     } finally { setBusy(false); }
   };
 
@@ -439,12 +560,12 @@ export const AppWorkspace = () => {
   if ((isBudgets && !canSeeBudgets) || (isAudit && !canSeeAudit) || ((isDepartments || isUsers) && !isAdmin)) return <Navigate to={`${routeBase}/dashboard`} replace />;
 
   const pageTitle = isClaims ? (role === 'Employee' ? 'My claims' : isManager ? 'Team claims' : 'Claims') : isBudgets ? 'Budget allocations' : isAudit ? 'Audit logs' : isDepartments ? 'Departments' : isUsers ? 'User roles' : 'Overview';
-  const pageDescription = isClaims ? 'Track, submit and review expense claims.' : isBudgets ? 'Quarterly department allocations and spend.' : isAudit ? 'Immutable record of claim decisions.' : isDepartments ? 'Manage the departments used across claims and budgets.' : isUsers ? 'Assign workspace roles to registered accounts.' : 'A clear view of company spend and approvals.';
+  const pageDescription = isClaims ? 'Track, submit and review expense claims.' : isBudgets ? 'Quarterly department allocations and spend.' : isAudit ? 'Immutable record of claim decisions and account access changes.' : isDepartments ? 'Manage the departments used across claims and budgets.' : isUsers ? 'Manage account roles, departments, and access.' : 'A clear view of company spend and approvals.';
 
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
-        <Link className="app-brand" to={`${routeBase}/dashboard`} aria-label="HimLedger overview"><span className="app-brand-mark">H</span><span>HimLedger</span></Link>
+        <Link className="app-brand" to={`${routeBase}/dashboard`} aria-label="HimLedger overview"><span className="app-brand-mark"><BrandMark size={25} /></span><span>HimLedger</span></Link>
         <div className="app-workspace-tag"><span className="app-online-dot" /> {role} workspace</div>
         <nav className="app-nav" aria-label="Workspace navigation">
           <span className="app-nav-label">WORKSPACE</span>
@@ -457,7 +578,20 @@ export const AppWorkspace = () => {
         <header className="app-topbar">
           <label className="app-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search claims, people, departments" aria-label="Search workspace" /></label>
           <div className="app-top-actions">
-            <button type="button" className="app-icon-button app-notifications" title={`${pendingCount} pending claims`} aria-label={`${pendingCount} pending claims`} onClick={() => navigate(`${routeBase}/claims`)}><Bell size={18} />{pendingCount > 0 && <span>{pendingCount > 9 ? '9+' : pendingCount}</span>}</button>
+            <div className="app-notification-wrap">
+              <button type="button" className="app-icon-button app-notifications" title={`${unreadNotificationCount} unread notifications`} aria-label={`${unreadNotificationCount} unread notifications`} aria-expanded={showNotifications} aria-controls="app-notification-menu" onClick={() => setShowNotifications((visible) => !visible)}><Bell size={18} />{unreadNotificationCount > 0 && <span>{unreadNotificationCount > 9 ? '9+' : unreadNotificationCount}</span>}</button>
+              {showNotifications && <section className="app-notification-menu" id="app-notification-menu" aria-label="Notifications">
+                <div className="app-notification-heading"><strong>Notifications</strong>{unreadNotificationCount > 0 && <button type="button" onClick={() => void markAllNotificationsRead()}>Mark all read</button>}</div>
+                {notificationsQuery.isLoading ? <p className="app-notification-empty">Loading notifications...</p>
+                  : notificationsQuery.error ? <p className="app-notification-empty" role="alert">Notifications could not be loaded.</p>
+                    : notificationItems.length === 0 ? <p className="app-notification-empty">You’re all caught up.</p>
+                      : <div className="app-notification-list">{notificationItems.map((notification) => <button type="button" key={notification.userNotificationId} className={`app-notification-item ${notification.readAt ? '' : 'is-unread'}`} onClick={() => void openNotification(notification)}>
+                        <span className="app-notification-item-title">{notification.title}</span>
+                        <span className="app-notification-item-message">{notification.message}</span>
+                        <small>{dateLabel(notification.createdAt)}</small>
+                      </button>)}</div>}
+              </section>}
+            </div>
             <div className="app-profile"><span className="app-avatar">{`${user?.firstName?.[0] ?? 'U'}${user?.lastName?.[0] ?? ''}`}</span><span className="app-profile-copy"><strong>{user?.firstName} {user?.lastName}</strong><small>{role}</small></span><ChevronDown size={14} /></div>
             <button type="button" className="app-signout" onClick={handleLogout} title="Sign out"><LogOut size={16} /><span>Sign out</span></button>
             <button type="button" className="app-icon-button app-mobile-menu" aria-label="Open navigation" onClick={() => document.querySelector('.app-sidebar')?.classList.toggle('is-open')}><Menu size={19} /></button>
@@ -492,7 +626,7 @@ export const AppWorkspace = () => {
 
           {isClaims && <section className="app-panel app-claims-panel"><div className="app-filter-row"><label className="app-filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{['Draft', 'Submitted', 'Pending Approval', 'Approved', 'Rejected', 'Changes Requested', 'Resubmitted', 'Reimbursed'].map((status) => <option key={status}>{status}</option>)}</select></label><label className="app-filter-select"><span>Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option>All departments</option>{departments.map((department) => <option key={department.departmentId} value={department.departmentId}>{department.name}</option>)}</select></label><label className="app-filter-select"><span>Category</span><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option>All categories</option>{categories.map((category) => <option key={category.categoryId} value={category.categoryId}>{category.name}</option>)}</select></label><label className="app-filter-date"><span>From</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label className="app-filter-date"><span>To</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label><span className="app-results-count">{visibleExpenses.length} {visibleExpenses.length === 1 ? 'claim' : 'claims'}</span>{canSeeAudit && <button type="button" className="app-secondary-button" onClick={() => void downloadReconciliationCsv()}><ArrowDownToLine size={15} /> Export reconciliation</button>}</div>
             <div className="app-table-scroll"><table className="app-table"><thead><tr><th>Claim ID</th><th>Employee</th><th>Expense</th><th>Category</th><th>Department</th><th>Date</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-              {loading ? <tr><td colSpan={9} className="app-table-message">Loading claims...</td></tr> : visibleExpenses.map((expense) => <tr key={expense.expenseId}><td className="app-id-cell">HL-{String(expense.expenseId).padStart(5, '0')}</td><td>{expense.userFullName}</td><td><span className="app-expense-title">{expense.title}</span>{expense.description && <small className="app-table-subtitle">{expense.description}</small>}</td><td>{expense.categoryName}</td><td>{expense.departmentName}</td><td>{dateLabel(expense.expenseDate)}</td><td className="app-money-cell">{money(expense.amount)}</td><td><span className={`app-status app-status--${expense.status.toLowerCase().replace(/\s+/g, '-')}`}>{expense.status}</span></td><td><div className="app-row-actions">{expense.receiptUrl && <a className="app-icon-button" href={expense.receiptUrl} target="_blank" rel="noreferrer" title="View receipt"><FileText size={15} /></a>}{expense.userId === user?.userId && (expense.status === 'Draft' || expense.status === 'Changes Requested') && <button type="button" className="app-icon-button" title="Submit claim" aria-label={`Submit ${expense.title}`} onClick={() => void submitExistingClaim(expense)}><ArrowDownToLine size={15} /></button>}{canReview && expense.status === 'Pending Approval' && <><button type="button" className="app-icon-button app-approve" title="Approve" aria-label={`Approve ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Approved'); setFormError(''); }}><Check size={16} /></button><button type="button" className="app-icon-button app-reject" title="Reject" aria-label={`Reject ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Rejected'); setFormError(''); }}><X size={16} /></button><button type="button" className="app-icon-button" title="Request changes" aria-label={`Request changes for ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Changes Requested'); setFormError(''); }}><FileText size={15} /></button></>}</div></td></tr>)}
+              {loading ? <tr><td colSpan={9} className="app-table-message">Loading claims...</td></tr> : visibleExpenses.map((expense) => <tr id={`claim-${expense.expenseId}`} key={expense.expenseId}><td className="app-id-cell">HL-{String(expense.expenseId).padStart(5, '0')}</td><td>{expense.userFullName}</td><td><span className="app-expense-title">{expense.title}</span>{expense.description && <small className="app-table-subtitle">{expense.description}</small>}</td><td>{expense.categoryName}</td><td>{expense.departmentName}</td><td>{dateLabel(expense.expenseDate)}</td><td className="app-money-cell">{money(expense.amount)}</td><td><span className={`app-status app-status--${expense.status.toLowerCase().replace(/\s+/g, '-')}`}>{expense.status}</span></td><td><div className="app-row-actions">{expense.receiptUrl && <a className="app-icon-button" href={expense.receiptUrl} target="_blank" rel="noreferrer" title="View receipt"><FileText size={15} /></a>}{expense.userId === user?.userId && (expense.status === 'Draft' || expense.status === 'Changes Requested') && <button type="button" className="app-icon-button" title="Submit claim" aria-label={`Submit ${expense.title}`} onClick={() => void submitExistingClaim(expense)}><ArrowDownToLine size={15} /></button>}{canReview && expense.status === 'Pending Approval' && <><button type="button" className="app-icon-button app-approve" title="Approve" aria-label={`Approve ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Approved'); setFormError(''); }}><Check size={16} /></button><button type="button" className="app-icon-button app-reject" title="Reject" aria-label={`Reject ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Rejected'); setFormError(''); }}><X size={16} /></button><button type="button" className="app-icon-button" title="Request changes" aria-label={`Request changes for ${expense.title}`} onClick={() => { setReviewTarget(expense); setReviewAction('Changes Requested'); setFormError(''); }}><FileText size={15} /></button></>}</div></td></tr>)}
               {!loading && visibleExpenses.length === 0 && <tr><td colSpan={9} className="app-table-message">No claims match these filters.</td></tr>}
             </tbody></table></div>
           </section>}
@@ -502,7 +636,9 @@ export const AppWorkspace = () => {
           {isAudit && <section className="app-panel app-audit-panel"><div className="app-audit-heading"><div><span className="app-section-kicker">READ-ONLY LEDGER</span><p>All timestamps are shown in UTC.</p></div><div className="app-export-actions"><button type="button" className="app-secondary-button" onClick={downloadAuditCsv}><ArrowDownToLine size={15} /> Export CSV</button><button type="button" className="app-secondary-button" onClick={() => window.print()}><FileText size={15} /> Print / PDF</button></div></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>Timestamp (UTC)</th><th>Claim ID</th><th>Action</th><th>Reviewed by</th><th>Manager comments</th></tr></thead><tbody>{auditRecords.map((record) => <tr key={record.approvalLogId}><td>{new Date(record.timestampUtc).toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' })}</td><td><strong>HL-{String(record.expenseId).padStart(5, '0')}</strong><small className="app-table-subtitle">{record.expenseTitle}</small></td><td><span className={`app-status app-status--${record.action.toLowerCase()}`}>{record.action}</span></td><td>{record.reviewedBy}</td><td>{record.comments || <span className="app-muted">No comment recorded</span>}</td></tr>)}{auditRecords.length === 0 && <tr><td colSpan={5} className="app-table-message">No review actions have been recorded.</td></tr>}</tbody></table></div></section>}
           {isDepartments && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ORGANIZATION</span><p>Departments are referenced by existing claims and budgets. Records cannot be deleted.</p></div><span className="app-results-count">{departments.length} departments</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>Department</th><th>Code</th><th>Actions</th></tr></thead><tbody>{departments.map((department) => <tr key={department.departmentId}><td><strong className="app-expense-title">{department.name}</strong></td><td><span className="app-department-code">{department.code}</span></td><td><button type="button" className="app-secondary-button app-edit-button" onClick={() => { setEditingDepartment(department); setDepartmentForm({ name: department.name, code: department.code }); setFormError(''); setShowDepartmentForm(true); }}>Edit department</button></td></tr>)}{departments.length === 0 && <tr><td colSpan={3} className="app-table-message">No departments configured.</td></tr>}</tbody></table></div></section>}
 
-          {isUsers && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ACCESS CONTROL</span><p>Role, department, and Entra assignments take effect on the next authenticated request.</p></div><span className="app-results-count">{managedUsers.length} accounts</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>User</th><th>Department</th><th>Current role</th><th>Assign role</th><th>Entra identity</th><th>Actions</th></tr></thead><tbody>{managedUsers.map((managedUser) => { const selectedRole = roleChanges[managedUser.userId] ?? managedUser.roleId; const selectedDepartment = departmentChanges[managedUser.userId] ?? managedUser.departmentId?.toString() ?? ''; return <tr key={managedUser.userId}><td><strong className="app-expense-title">{managedUser.firstName} {managedUser.lastName}</strong><small className="app-table-subtitle">{managedUser.email}</small></td><td><select className="app-role-select" aria-label={`Department for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedDepartment} onChange={(event) => setDepartmentChanges((current) => ({ ...current, [managedUser.userId]: event.target.value }))}><option value="">Unassigned</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></td><td>{managedUser.roleName}</td><td><select className="app-role-select" aria-label={`Role for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedRole} onChange={(event) => setRoleChanges((current) => ({ ...current, [managedUser.userId]: Number(event.target.value) }))}>{roles.map((item) => <option key={item.roleId} value={item.roleId}>{item.name}</option>)}</select></td><td>{managedUser.entraObjectId ? 'Linked' : 'Not linked'}</td><td><div className="app-row-actions"><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedRole === managedUser.roleId || managedUser.userId === user?.userId} onClick={() => void saveUserRole(managedUser)}>{managedUser.userId === user?.userId ? 'Current account' : 'Save role'}</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedDepartment === (managedUser.departmentId?.toString() ?? '')} onClick={() => void saveUserDepartment(managedUser)}>Save department</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy} onClick={() => { setIdentityTarget(managedUser); setEntraIdentityForm({ tenantId: managedUser.entraTenantId ?? '', objectId: managedUser.entraObjectId ?? '' }); }}>Link Entra ID</button></div></td></tr>})}{managedUsers.length === 0 && <tr><td colSpan={6} className="app-table-message">No user accounts found.</td></tr>}</tbody></table></div></section>}
+          {isUsers && <section className="app-panel app-admin-panel"><div className="app-admin-section-heading"><div><span className="app-section-kicker">ACCESS CONTROL</span><p>Deactivated accounts can no longer sign in. Existing claims and audit history are retained.</p></div><span className="app-results-count">{managedUsers.length} accounts</span></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>User</th><th>Department</th><th>Current role</th><th>Assign role</th><th>Entra identity</th><th>Actions</th><th>Account access</th></tr></thead><tbody>{managedUsers.map((managedUser) => { const selectedRole = roleChanges[managedUser.userId] ?? managedUser.roleId; const selectedDepartment = departmentChanges[managedUser.userId] ?? managedUser.departmentId?.toString() ?? ''; return <tr key={managedUser.userId}><td><strong className="app-expense-title">{managedUser.firstName} {managedUser.lastName}</strong><small className="app-table-subtitle">{managedUser.email}</small></td><td><select className="app-role-select" aria-label={`Department for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedDepartment} onChange={(event) => setDepartmentChanges((current) => ({ ...current, [managedUser.userId]: event.target.value }))}><option value="">Unassigned</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></td><td>{managedUser.roleName}</td><td><select className="app-role-select" aria-label={`Role for ${managedUser.firstName} ${managedUser.lastName}`} value={selectedRole} onChange={(event) => setRoleChanges((current) => ({ ...current, [managedUser.userId]: Number(event.target.value) }))}>{roles.map((item) => <option key={item.roleId} value={item.roleId}>{item.name}</option>)}</select></td><td>{managedUser.entraObjectId ? 'Linked' : 'Not linked'}</td><td><div className="app-row-actions"><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedRole === managedUser.roleId || managedUser.userId === user?.userId} onClick={() => void saveUserRole(managedUser)}>{managedUser.userId === user?.userId ? 'Current account' : 'Save role'}</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy || selectedDepartment === (managedUser.departmentId?.toString() ?? '')} onClick={() => void saveUserDepartment(managedUser)}>Save department</button><button type="button" className="app-secondary-button app-edit-button" disabled={busy} onClick={() => { setIdentityTarget(managedUser); setEntraIdentityForm({ tenantId: managedUser.entraTenantId ?? '', objectId: managedUser.entraObjectId ?? '' }); }}>Link Entra ID</button></div></td><td><span className={managedUser.isActive ? 'app-access-state is-active' : 'app-access-state is-inactive'}>{managedUser.isActive ? 'Active' : 'Deactivated'}</span><button type="button" className="app-secondary-button app-edit-button" disabled={busy || managedUser.userId === user?.userId} onClick={() => void setUserActive(managedUser)}>{managedUser.isActive ? 'Deactivate access' : 'Reactivate access'}</button></td></tr>})}{managedUsers.length === 0 && <tr><td colSpan={7} className="app-table-message">No user accounts found.</td></tr>}</tbody></table></div></section>}
+
+          {isAudit && isAdmin && <section className="app-panel app-audit-panel app-access-audit-panel"><div className="app-audit-heading"><div><span className="app-section-kicker">ACCOUNT ACCESS</span><p>Admin account activation and deactivation history.</p></div></div><div className="app-table-scroll"><table className="app-table"><thead><tr><th>Timestamp (UTC)</th><th>Account</th><th>Change</th><th>Changed by</th></tr></thead><tbody>{userAccessAuditRecords.map((record) => <tr key={record.userAccessAuditLogId}><td>{new Date(record.occurredAt).toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' })}</td><td><strong>{record.user}</strong><small className="app-table-subtitle">{record.email}</small></td><td>{record.isActive ? 'Access reactivated' : 'Access deactivated'}</td><td>{record.actor}</td></tr>)}{userAccessAuditRecords.length === 0 && <tr><td colSpan={4} className="app-table-message">No account access changes have been recorded.</td></tr>}</tbody></table></div></section>}
         </main>
       </div>
 
@@ -515,6 +651,7 @@ export const AppWorkspace = () => {
             <label className="app-form-field"><span>Department</span><select {...claimForm.register('departmentId')}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select>{claimForm.formState.errors.departmentId && <small role="alert" className="app-form-error">{claimForm.formState.errors.departmentId.message}</small>}</label>
             <label className="app-form-field"><span>Amount (ZAR)</span><input type="number" min="0.01" step="0.01" {...claimForm.register('amount')} placeholder="0.00" />{claimForm.formState.errors.amount && <small role="alert" className="app-form-error">{claimForm.formState.errors.amount.message}</small>}</label>
             <label className="app-form-field"><span>Expense date</span><input type="date" {...claimForm.register('expenseDate')} />{claimForm.formState.errors.expenseDate && <small role="alert" className="app-form-error">{claimForm.formState.errors.expenseDate.message}</small>}</label>
+            <div className="app-claim-budget-preview app-form-field--full" aria-live="polite"><strong>Budget availability</strong>{claimBudgetQuery.isLoading ? <span>Checking this department’s allocation...</span> : claimBudgetQuery.error ? <span>Budget availability could not be checked. Your claim can still be submitted for review.</span> : !selectedClaimDepartment ? <span>Select a department to see its budget.</span> : claimBudget ? <><span>{money(claimBudget.remainingAmount)} currently remains{Number(selectedClaimAmount) > 0 ? `; approximately ${money(claimBudget.remainingAmount - Number(selectedClaimAmount))} would remain after this claim` : ''}. Approval depends on the available allocation.</span>{Number(selectedClaimAmount) > 0 && claimBudget.remainingAmount - Number(selectedClaimAmount) < 0 && <span className="app-form-error">This amount appears to exceed the remaining budget and may be blocked at approval.</span>}</> : <span>No budget is allocated for this department and quarter. Ask Finance or an administrator about allocation before submitting.</span>}</div>
             <label className="app-form-field app-form-field--full"><span>Notes</span><textarea rows={3} {...claimForm.register('description')} placeholder="Add business purpose or context" />{claimForm.formState.errors.description && <small role="alert" className="app-form-error">{claimForm.formState.errors.description.message}</small>}</label>
             <label className="app-form-field app-form-field--full"><span>Receipt (PDF, JPEG or PNG; max 10 MiB)</span><input type="file" accept="application/pdf,image/jpeg,image/png" onChange={(event) => setReceiptFile(event.target.files?.[0] ?? null)} />{receiptFile && <small>{receiptFile.name}</small>}</label>
             {formError && <p role="alert" className="app-form-error app-form-field--full">{formError}</p>}
@@ -523,7 +660,7 @@ export const AppWorkspace = () => {
         </section>
       </div>}
 
-      {reviewTarget && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewTarget(null); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM HL-{String(reviewTarget.expenseId).padStart(5, '0')}</span><h2 id="review-title">{reviewAction} claim</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setReviewTarget(null)}><X size={18} /></button></div><p className="app-review-summary"><strong>{reviewTarget.title}</strong><span>{reviewTarget.userFullName} · {money(reviewTarget.amount)}</span></p><form onSubmit={submitReview} className="app-review-form"><label className="app-form-field"><span>Comment</span><textarea maxLength={500} rows={4} value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} placeholder="Add context for this decision" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setReviewTarget(null)}>Cancel</button><button type="submit" className={`app-primary-button ${reviewAction === 'Rejected' ? 'is-danger' : ''}`} disabled={busy}>{busy ? 'Saving...' : `Confirm ${reviewAction.toLowerCase()}`}</button></div></form></section></div>}
+      {reviewTarget && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewTarget(null); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="app-modal-heading"><div><span className="app-section-kicker">CLAIM HL-{String(reviewTarget.expenseId).padStart(5, '0')}</span><h2 id="review-title">{reviewAction} claim</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setReviewTarget(null)}><X size={18} /></button></div><div className="app-review-summary"><strong>{reviewTarget.title}</strong><span>{reviewTarget.userFullName} · {money(reviewTarget.amount)}</span><span>{reviewTarget.categoryName} · {reviewTarget.departmentName} · {dateLabel(reviewTarget.expenseDate)}</span><p><b>Description</b>{reviewTarget.description?.trim() || 'No description was provided.'}</p></div><div className="app-review-budget" aria-live="polite"><strong>Budget check</strong>{reviewBudgetQuery.isLoading ? <span>Checking the allocation for this claim...</span> : reviewBudgetQuery.error ? <span>Budget details could not be loaded. The server will validate the budget when you approve.</span> : reviewBudget ? <span>Allocated: {money(reviewBudget.allocatedAmount)} · Remaining after this pending claim: {money(reviewBudget.remainingAmount)}</span> : <span>No budget is allocated for this department and fiscal quarter. Ask Finance or an administrator to allocate one before approving.</span>}</div><form onSubmit={submitReview} className="app-review-form"><label className="app-form-field"><span>Comment</span><textarea maxLength={500} rows={4} value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} placeholder="Add context for this decision" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setReviewTarget(null)}>Cancel</button><button type="submit" className={`app-primary-button ${reviewAction === 'Rejected' ? 'is-danger' : ''}`} disabled={busy}>{busy ? 'Saving...' : `Confirm ${reviewAction.toLowerCase()}`}</button></div></form></section></div>}
 
       {showBudgetForm && <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowBudgetForm(false); }}><section className="app-modal app-modal--small" role="dialog" aria-modal="true" aria-labelledby="allocation-title"><div className="app-modal-heading"><div><span className="app-section-kicker">FY {year} · Q{quarter}</span><h2 id="allocation-title">Adjust allocation</h2></div><button type="button" className="app-icon-button" aria-label="Close" onClick={() => setShowBudgetForm(false)}><X size={18} /></button></div><form className="app-review-form" onSubmit={saveAllocation}><label className="app-form-field"><span>Department</span><select required value={allocation.departmentId} onChange={(event) => setAllocation({ ...allocation, departmentId: event.target.value })}><option value="">Select department</option>{departments.map((item) => <option key={item.departmentId} value={item.departmentId}>{item.name}</option>)}</select></label><label className="app-form-field"><span>Allocated amount (ZAR)</span><input required type="number" min="0" step="0.01" value={allocation.amount} onChange={(event) => setAllocation({ ...allocation, amount: event.target.value })} placeholder="0.00" /></label>{formError && <p role="alert" className="app-form-error">{formError}</p>}<div className="app-modal-actions"><button type="button" className="app-secondary-button" onClick={() => setShowBudgetForm(false)}>Cancel</button><button type="submit" className="app-primary-button" disabled={busy}>{busy ? 'Saving...' : 'Save allocation'}</button></div></form></section></div>}
 

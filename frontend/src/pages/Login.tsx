@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, LockKeyhole, Mail } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, LockKeyhole, Mail } from 'lucide-react';
 import { isAxiosError } from 'axios';
 import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
@@ -29,6 +29,7 @@ interface CurrentUser {
 export const Login: React.FC = () => {
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
   const localLoginEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_LOCAL_LOGIN === 'true';
@@ -74,7 +75,7 @@ export const Login: React.FC = () => {
       const isUnavailable = isAxiosError(err) && !err.response;
       setError(message || (isUnavailable
         ? 'Unable to reach HimLedger. Check that the API is running and try again.'
-        : 'Login failed. Check your credentials.'));
+        : "We couldn't sign you in. Verify your work email and password, or contact your administrator."));
     } finally {
       setIsSubmitting(false);
     }
@@ -95,7 +96,7 @@ export const Login: React.FC = () => {
       <div className="login-frame">
         <section className="login-story" aria-label="HimLedger">
           <Link className="login-brand" to="/" aria-label="HimLedger home">
-            <span className="brand-mark"><BrandMark size={23} /></span>
+            <span className="brand-mark"><BrandMark size={25} /></span>
             HimLedger
           </Link>
           <div className="login-story-copy">
@@ -132,13 +133,17 @@ export const Login: React.FC = () => {
               <label htmlFor="login-password">Password</label>
               <div className="login-input-wrap">
                 <LockKeyhole aria-hidden="true" />
-                <input id="login-password" type="password" autoComplete="current-password" {...form.register('password')} placeholder="Enter your password" />
+                <input id="login-password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" {...form.register('password')} placeholder="Enter your password" />
+                <button type="button" className="login-password-toggle" aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword} onClick={() => setShowPassword((visible) => !visible)}>
+                  {showPassword ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+                </button>
               </div>
               {form.formState.errors.password && <small role="alert" className="login-error">{form.formState.errors.password.message}</small>}
             </div>
             <button type="submit" className="login-submit" disabled={isSubmitting}>
               {isSubmitting ? 'Signing in...' : 'Sign in'} <ArrowRight size={17} aria-hidden="true" />
             </button>
+            <p className="login-help">Forgot your password or need access? <a href="mailto:support@himledger.com">Contact support</a> for help.</p>
           </form> : !isEntraConfigured && <p role="status">Company sign-in is not configured. Contact your administrator.</p>}
           <div className="login-panel-foot">HimLedger · Expense operations</div>
         </section>

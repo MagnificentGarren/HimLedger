@@ -49,6 +49,30 @@ public class AuditLogsController(ApplicationDbContext context) : ControllerBase
             records.TotalCount));
     }
 
+    [Authorize(Roles = "Admin")]
+    [HttpGet("user-access")]
+    public async Task<IActionResult> GetUserAccessAuditLogs(
+        CancellationToken cancellationToken,
+        [FromQuery, Range(1, 21_474_836)] int page = 1,
+        [FromQuery, Range(1, 100)] int pageSize = 25)
+    {
+        var records = await context.UserAccessAuditLogs
+            .OrderByDescending(log => log.OccurredAt)
+            .ThenByDescending(log => log.UserAccessAuditLogId)
+            .Select(log => new
+            {
+                log.UserAccessAuditLogId,
+                log.OccurredAt,
+                User = log.User.FirstName + " " + log.User.LastName,
+                log.User.Email,
+                Actor = log.Actor.FirstName + " " + log.Actor.LastName,
+                log.IsActive
+            })
+            .ToPagedResponseAsync(page, pageSize, cancellationToken);
+
+        return Ok(records);
+    }
+
     /// <summary>One immutable claim lifecycle event.</summary>
     public sealed record AuditLogItem(
         long ApprovalLogId,

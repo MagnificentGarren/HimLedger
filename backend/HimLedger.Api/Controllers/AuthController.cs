@@ -17,6 +17,9 @@ public class AuthController(
     IConfiguration configuration) : ControllerBase
 {
     private readonly PasswordHasher<User> _passwordHasher = new();
+    private static readonly User DummyLoginUser = new();
+    private static readonly string DummyLoginPasswordHash =
+        new PasswordHasher<User>().HashPassword(DummyLoginUser, Guid.NewGuid().ToString("N"));
 
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginDto request, CancellationToken cancellationToken)
@@ -33,12 +36,13 @@ public class AuthController(
             .Include(user => user.Role)
             .FirstOrDefaultAsync(user => user.Email == request.Email, cancellationToken);
 
-        if (user is null)
+        if (user is null || !user.IsActive)
         {
+            _passwordHasher.VerifyHashedPassword(DummyLoginUser, DummyLoginPasswordHash, request.Password);
             return Problem(
                 statusCode: StatusCodes.Status401Unauthorized,
                 title: "Unauthorized",
-                detail: "Invalid email or password.");
+                detail: "We couldn't sign you in. Check your work email and password, or contact your administrator.");
         }
 
         var verification = _passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
@@ -49,7 +53,7 @@ public class AuthController(
                 return Problem(
                     statusCode: StatusCodes.Status401Unauthorized,
                     title: "Unauthorized",
-                    detail: "Invalid email or password.");
+                    detail: "We couldn't sign you in. Check your work email and password, or contact your administrator.");
             }
 
             user.PasswordHash = _passwordHasher.HashPassword(user, request.Password);

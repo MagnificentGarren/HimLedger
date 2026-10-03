@@ -28,6 +28,8 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
     public DbSet<ApprovalDelegation> ApprovalDelegations => Set<ApprovalDelegation>();
     public DbSet<ExpenseAttachment> ExpenseAttachments => Set<ExpenseAttachment>();
     public DbSet<NotificationOutboxMessage> NotificationOutboxMessages => Set<NotificationOutboxMessage>();
+    public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
+    public DbSet<UserAccessAuditLog> UserAccessAuditLogs => Set<UserAccessAuditLog>();
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
@@ -79,6 +81,7 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(user => user.LastName).HasMaxLength(50);
             entity.Property(user => user.Email).HasMaxLength(100);
             entity.Property(user => user.PasswordHash).HasMaxLength(255);
+            entity.Property(user => user.IsActive).HasDefaultValue(true);
             entity.Property(user => user.EntraTenantId).HasMaxLength(36);
             entity.Property(user => user.EntraObjectId).HasMaxLength(36);
             entity.Property(user => user.CreatedAt).HasDefaultValueSql("GETUTCDATE()");
@@ -247,6 +250,34 @@ public class ApplicationDbContext(DbContextOptions<ApplicationDbContext> options
             entity.Property(message => message.LastError).HasMaxLength(2000);
             entity.HasIndex(message => message.IdempotencyKey).IsUnique();
             entity.HasIndex(message => new { message.DispatchedAt, message.NextAttemptAt, message.LockedUntil });
+        });
+
+        modelBuilder.Entity<UserNotification>(entity =>
+        {
+            entity.Property(notification => notification.Title).HasMaxLength(120);
+            entity.Property(notification => notification.Message).HasMaxLength(700);
+            entity.HasIndex(notification => new { notification.UserId, notification.ReadAt, notification.CreatedAt });
+            entity.HasOne(notification => notification.User)
+                .WithMany()
+                .HasForeignKey(notification => notification.UserId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(notification => notification.Expense)
+                .WithMany()
+                .HasForeignKey(notification => notification.ExpenseId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<UserAccessAuditLog>(entity =>
+        {
+            entity.HasIndex(log => new { log.OccurredAt, log.UserAccessAuditLogId });
+            entity.HasOne(log => log.User)
+                .WithMany()
+                .HasForeignKey(log => log.UserId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(log => log.Actor)
+                .WithMany()
+                .HasForeignKey(log => log.ActorUserId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 

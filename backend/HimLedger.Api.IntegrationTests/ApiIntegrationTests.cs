@@ -7,11 +7,13 @@ using System.Security.Claims;
 using HimLedger.Domain.Entities;
 using HimLedger.Infrastructure;
 using HimLedger.Infrastructure.Services;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
 
@@ -106,6 +108,39 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 
         Assert.True(response.IsSuccessStatusCode);
         Assert.Equal("Healthy", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Readiness_endpoint_reports_database_availability()
+    {
+        using var response = await _client.GetAsync("/ready");
+
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("Healthy", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Liveness_does_not_depend_on_database_readiness()
+    {
+        using var unhealthyFactory = _testFactory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+                services.Configure<HealthCheckServiceOptions>(options =>
+                    options.Registrations.Add(new HealthCheckRegistration(
+                        "test-database-failure",
+                        _ => new FailingReadinessHealthCheck(),
+                        HealthStatus.Unhealthy,
+                        ["ready"]))));
+        });
+        using var client = unhealthyFactory.CreateClient();
+
+        using var livenessResponse = await client.GetAsync("/healthz");
+        using var readinessResponse = await client.GetAsync("/ready");
+
+        Assert.Equal(System.Net.HttpStatusCode.OK, livenessResponse.StatusCode);
+        Assert.Equal("Healthy", await livenessResponse.Content.ReadAsStringAsync());
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, readinessResponse.StatusCode);
+        Assert.Equal("Unhealthy", await readinessResponse.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -265,6 +300,53 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task Login_failures_do_not_disclose_whether_the_account_exists_or_is_active()
+    {
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var user = await context.Users.SingleAsync(item => item.UserId == 11);
+            user.PasswordHash = new PasswordHasher<User>().HashPassword(user, "correct-password");
+            await context.SaveChangesAsync();
+        }
+
+        using var wrongPasswordResponse = await _client.PostAsJsonAsync("/api/Auth/login", new
+        {
+            email = "north@example.com",
+            password = "incorrect-password"
+        });
+        using var unknownUserResponse = await _client.PostAsJsonAsync("/api/Auth/login", new
+        {
+            email = "unknown@example.com",
+            password = "incorrect-password"
+        });
+        using var wrongPassword = await wrongPasswordResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        using var unknownUser = await unknownUserResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var user = await context.Users.SingleAsync(item => item.UserId == 11);
+            user.IsActive = false;
+            await context.SaveChangesAsync();
+        }
+        using var inactiveUserResponse = await _client.PostAsJsonAsync("/api/Auth/login", new
+        {
+            email = "north@example.com",
+            password = "correct-password"
+        });
+        using var inactiveUser = await inactiveUserResponse.Content.ReadFromJsonAsync<JsonDocument>();
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, wrongPasswordResponse.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, unknownUserResponse.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, inactiveUserResponse.StatusCode);
+        var expectedDetail = "We couldn't sign you in. Check your work email and password, or contact your administrator.";
+        Assert.Equal(expectedDetail, wrongPassword!.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(expectedDetail, unknownUser!.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(expectedDetail, inactiveUser!.RootElement.GetProperty("detail").GetString());
+    }
+
+    [Fact]
     public async Task Claim_submission_records_each_lifecycle_transition_and_outbox_event()
     {
         SetUserToken(11);
@@ -300,6 +382,122 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         Assert.Equal(2, await context.NotificationOutboxMessages.CountAsync(item =>
             item.Payload.Contains($"\"expenseId\":{expenseId}", StringComparison.Ordinal)));
+
+        SetUserToken(11);
+        using var employeeNotificationsResponse = await _client.GetAsync("/api/Notifications");
+        using var employeeNotifications = await employeeNotificationsResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Equal(0, employeeNotifications!.RootElement.GetProperty("unreadCount").GetInt32());
+
+        SetUserToken(10);
+        using var managerNotificationsResponse = await _client.GetAsync("/api/Notifications");
+        using var managerNotifications = await managerNotificationsResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Contains(
+            managerNotifications!.RootElement.GetProperty("notifications").EnumerateArray(),
+            item => item.GetProperty("expenseId").GetInt32() == expenseId);
+
+        SetUserToken(13);
+        using var financeNotificationsResponse = await _client.GetAsync("/api/Notifications");
+        using var financeNotifications = await financeNotificationsResponse.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.Contains(
+            financeNotifications!.RootElement.GetProperty("notifications").EnumerateArray(),
+            item => item.GetProperty("expenseId").GetInt32() == expenseId);
+    }
+
+    [Fact]
+    public async Task Notifications_are_private_to_the_recipient_and_can_be_marked_read()
+    {
+        long ownNotificationId;
+        long anotherUsersNotificationId;
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var ownNotification = new UserNotification
+            {
+                UserId = 11,
+                ExpenseId = 101,
+                Title = "Your claim was rejected",
+                Message = "Please review the comment."
+            };
+            var anotherUsersNotification = new UserNotification
+            {
+                UserId = 12,
+                ExpenseId = 202,
+                Title = "A different claim",
+                Message = "This notice belongs to another employee."
+            };
+            context.UserNotifications.AddRange(ownNotification, anotherUsersNotification);
+            await context.SaveChangesAsync();
+            ownNotificationId = ownNotification.UserNotificationId;
+            anotherUsersNotificationId = anotherUsersNotification.UserNotificationId;
+        }
+
+        SetUserToken(11);
+        using var response = await _client.GetAsync("/api/Notifications");
+        using var body = await response.Content.ReadFromJsonAsync<JsonDocument>();
+        using var unauthorizedRead = await _client.PostAsync(
+            $"/api/Notifications/{anotherUsersNotificationId}/read",
+            content: null);
+        using var markRead = await _client.PostAsync($"/api/Notifications/{ownNotificationId}/read", content: null);
+
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, body!.RootElement.GetProperty("unreadCount").GetInt32());
+        Assert.Single(body.RootElement.GetProperty("notifications").EnumerateArray());
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, unauthorizedRead.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, markRead.StatusCode);
+
+        using var scopeAfterRead = _testFactory.Services.CreateScope();
+        var contextAfterRead = scopeAfterRead.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.NotNull((await contextAfterRead.UserNotifications.SingleAsync(item =>
+            item.UserNotificationId == ownNotificationId)).ReadAt);
+    }
+
+    [Fact]
+    public async Task Missing_budget_returns_a_specific_reason_and_keeps_the_claim_pending()
+    {
+        using (var scope = _testFactory.Services.CreateScope())
+        {
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var budget = await context.Budgets.SingleAsync(item => item.DepartmentId == 1);
+            context.Budgets.Remove(budget);
+            await context.SaveChangesAsync();
+        }
+
+        SetUserToken(10);
+        using var response = await _client.PutAsJsonAsync("/api/Expenses/101/status", new
+        {
+            status = ClaimStatuses.Approved,
+            comments = "Eligible review attempt",
+            rowVersion = Convert.ToBase64String(new byte[8])
+        });
+        using var problem = await response.Content.ReadFromJsonAsync<JsonDocument>();
+        using var scopeAfterDecision = _testFactory.Services.CreateScope();
+        var contextAfterDecision = scopeAfterDecision.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("No budget is allocated", problem!.RootElement.GetProperty("detail").GetString());
+        Assert.Contains("Ask Finance or an administrator", problem.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(ClaimStatuses.PendingApproval, (await contextAfterDecision.Expenses
+            .SingleAsync(item => item.ExpenseId == 101)).Status);
+    }
+
+    [Fact]
+    public async Task Admin_can_deactivate_accounts_without_deleting_their_audit_history()
+    {
+        SetUserToken(1);
+        using var response = await _client.PutAsJsonAsync("/api/Users/11/active", new { isActive = false });
+
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
+        using var scope = _testFactory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.False((await context.Users.SingleAsync(item => item.UserId == 11)).IsActive);
+        var accessLog = await context.UserAccessAuditLogs.SingleAsync();
+        Assert.Equal(11, accessLog.UserId);
+        Assert.Equal(1, accessLog.ActorUserId);
+        Assert.False(accessLog.IsActive);
+
+        SetUserToken(11);
+        using var inactiveResponse = await _client.GetAsync("/api/Categories");
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, inactiveResponse.StatusCode);
     }
 
     [Fact]
@@ -575,6 +773,14 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         _client.Dispose();
         _testFactory.Dispose();
+    }
+
+    private sealed class FailingReadinessHealthCheck : IHealthCheck
+    {
+        public Task<HealthCheckResult> CheckHealthAsync(
+            HealthCheckContext context,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(HealthCheckResult.Unhealthy());
     }
 
     private sealed class TestReceiptStorage : IReceiptStorage
