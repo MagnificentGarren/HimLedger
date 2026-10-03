@@ -1,8 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 :root {
   font-family: 'DM Sans', 'Aptos', sans-serif;
@@ -50,4 +48,3 @@ button {
   color: #061116;
   background: #75e0d5;
 }
-
